@@ -1,0 +1,9 @@
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/tra86.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/edit_cache.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/rebuild_cache.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/list_install_components.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/install.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/install/local.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/install/strip.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/tra86_autogen_timestamp_deps.dir
+/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/CMakeFiles/tra86_autogen.dir

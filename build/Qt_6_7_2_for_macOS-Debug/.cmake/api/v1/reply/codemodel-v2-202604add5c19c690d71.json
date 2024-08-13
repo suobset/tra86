@@ -1,0 +1,79 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-01853cd660b733dc106a.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.16"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "tra86",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "tra86::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-tra86-Debug-481d8c63410fcf60d4e4.json",
+					"name" : "tra86",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "tra86_autogen::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-tra86_autogen-Debug-2ee8757fc60bfa0d6379.json",
+					"name" : "tra86_autogen",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "tra86_autogen_timestamp_deps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-tra86_autogen_timestamp_deps-Debug-750e17b62e1b016900bd.json",
+					"name" : "tra86_autogen_timestamp_deps",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug",
+		"source" : "/Users/kushagrasrivastava/Documents/tra86"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 7
+	}
+}
