@@ -7,7 +7,7 @@
 				{
 					"build" : ".",
 					"hasInstallRule" : true,
-					"jsonFile" : "directory-.-Debug-01853cd660b733dc106a.json",
+					"jsonFile" : "directory-.-Debug-19e5ffc4b68d0b089cea.json",
 					"minimumCMakeVersion" : 
 					{
 						"string" : "3.16"
@@ -44,7 +44,7 @@
 				{
 					"directoryIndex" : 0,
 					"id" : "tra86::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-tra86-Debug-481d8c63410fcf60d4e4.json",
+					"jsonFile" : "target-tra86-Debug-4c8d47e536d3aa472a7a.json",
 					"name" : "tra86",
 					"projectIndex" : 0
 				},
