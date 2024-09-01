@@ -29,6 +29,8 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         LICENSE.md
         CREDITS.md
         README.md
+        tra86_backend.cpp
+        tra86_backend.h
     )
 # Define target properties for Android with Qt 6 as:
 #    set_property(TARGET tra86 APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR

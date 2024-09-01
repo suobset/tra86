@@ -1,4 +1,5 @@
 #include "tra86.h"
+#include "tra86_backend.h"
 #include "./ui_tra86.h"
 #include <QFileDialog>
 #include <QMessageBox>
@@ -70,5 +71,18 @@ void tra86::on_actionSave_triggered()
 void tra86::on_actionNew_triggered()
 {
     newDocument();
+}
+
+//-------------------------------------------------------------------------------------------------
+// End of UI files. The files following communicate with the backend to facilitate building
+// and execution of the C++/RUST files, as well as the calculation of Performance Metrics
+//-------------------------------------------------------------------------------------------------
+
+void tra86::on_actionC_3_triggered()
+{
+    // This is Run -> Build -> C++
+    //on_actionSave_triggered();
+    std::string curFileUTF8 = currentFile.toUtf8().constData();
+    startCBuild(curFileUTF8);
 }
 

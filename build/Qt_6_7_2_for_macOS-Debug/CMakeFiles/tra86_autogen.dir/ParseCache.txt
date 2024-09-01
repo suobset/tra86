@@ -244,5 +244,7 @@
  mdp:/Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtWidgets.framework/Versions/A/Headers/qtwidgetsglobal.h
  mdp:/Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtWidgets.framework/Versions/A/Headers/qwidget.h
 /Users/kushagrasrivastava/Documents/tra86/main.cpp
+/Users/kushagrasrivastava/Documents/tra86/tra86_backend.h
 /Users/kushagrasrivastava/Documents/tra86/tra86.cpp
  uic:./ui_tra86.h
+/Users/kushagrasrivastava/Documents/tra86/tra86_backend.cpp

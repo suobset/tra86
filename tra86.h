@@ -1,6 +1,7 @@
 #ifndef TRA86_H
 #define TRA86_H
 
+#include <iostream>
 #include <QMainWindow>
 
 QT_BEGIN_NAMESPACE
@@ -24,6 +25,8 @@ private slots:
     void on_actionSave_triggered();
 
     void on_actionNew_triggered();
+
+    void on_actionC_3_triggered();
 
 private:
     Ui::tra86 *ui;

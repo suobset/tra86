@@ -73,6 +73,14 @@ build CMakeFiles/tra86.dir/tra86.cpp.o: CXX_COMPILER__tra86_unscanned_Debug /Use
   OBJECT_DIR = CMakeFiles/tra86.dir
   OBJECT_FILE_DIR = CMakeFiles/tra86.dir
 
+build CMakeFiles/tra86.dir/tra86_backend.cpp.o: CXX_COMPILER__tra86_unscanned_Debug /Users/kushagrasrivastava/Documents/tra86/tra86_backend.cpp || cmake_object_order_depends_target_tra86
+  DEFINES = -DQT_CORE_LIB -DQT_GUI_LIB -DQT_WIDGETS_LIB
+  DEP_FILE = CMakeFiles/tra86.dir/tra86_backend.cpp.o.d
+  FLAGS = -DQT_QML_DEBUG -g -std=gnu++17 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.5.sdk -fcolor-diagnostics
+  INCLUDES = -I/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/tra86_autogen/include -isystem /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtCore.framework/Headers -iframework /Users/kushagrasrivastava/Qt/6.7.2/macos/lib -isystem /Users/kushagrasrivastava/Qt/6.7.2/macos/mkspecs/macx-clang -isystem /Users/kushagrasrivastava/Qt/6.7.2/macos/include -isystem /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtWidgets.framework/Headers -isystem /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtGui.framework/Headers
+  OBJECT_DIR = CMakeFiles/tra86.dir
+  OBJECT_FILE_DIR = CMakeFiles/tra86.dir
+
 
 # =============================================================================
 # Link build statements for EXECUTABLE target tra86
@@ -81,7 +89,7 @@ build CMakeFiles/tra86.dir/tra86.cpp.o: CXX_COMPILER__tra86_unscanned_Debug /Use
 #############################################
 # Link the executable tra86.app/Contents/MacOS/tra86
 
-build tra86.app/Contents/MacOS/tra86: CXX_EXECUTABLE_LINKER__tra86_Debug CMakeFiles/tra86.dir/tra86_autogen/mocs_compilation.cpp.o CMakeFiles/tra86.dir/main.cpp.o CMakeFiles/tra86.dir/tra86.cpp.o | /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtWidgets.framework/Versions/A/QtWidgets /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtGui.framework/Versions/A/QtGui /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtCore.framework/Versions/A/QtCore || tra86_autogen tra86_autogen_timestamp_deps
+build tra86.app/Contents/MacOS/tra86: CXX_EXECUTABLE_LINKER__tra86_Debug CMakeFiles/tra86.dir/tra86_autogen/mocs_compilation.cpp.o CMakeFiles/tra86.dir/main.cpp.o CMakeFiles/tra86.dir/tra86.cpp.o CMakeFiles/tra86.dir/tra86_backend.cpp.o | /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtWidgets.framework/Versions/A/QtWidgets /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtGui.framework/Versions/A/QtGui /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtCore.framework/Versions/A/QtCore || tra86_autogen tra86_autogen_timestamp_deps
   FLAGS = -DQT_QML_DEBUG -g -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.5.sdk
   LINK_LIBRARIES = -Wl,-rpath,/Users/kushagrasrivastava/Qt/6.7.2/macos/lib  /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtWidgets.framework/Versions/A/QtWidgets  /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtGui.framework/Versions/A/QtGui  /Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtCore.framework/Versions/A/QtCore  -framework IOKit  -framework DiskArbitration  -framework OpenGL  -framework AGL  -framework AppKit  -framework ImageIO  -framework Metal
   LINK_PATH = -F/Users/kushagrasrivastava/Qt/6.7.2/macos/lib

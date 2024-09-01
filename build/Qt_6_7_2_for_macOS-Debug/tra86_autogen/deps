@@ -98,6 +98,8 @@ tra86_autogen/timestamp: \
 	/Users/kushagrasrivastava/Documents/tra86/main.cpp \
 	/Users/kushagrasrivastava/Documents/tra86/tra86.cpp \
 	/Users/kushagrasrivastava/Documents/tra86/tra86.h \
+	/Users/kushagrasrivastava/Documents/tra86/tra86_backend.cpp \
+	/Users/kushagrasrivastava/Documents/tra86/tra86_backend.h \
 	/Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtCore.framework/Versions/A/Headers/q20functional.h \
 	/Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtCore.framework/Versions/A/Headers/q20memory.h \
 	/Users/kushagrasrivastava/Qt/6.7.2/macos/lib/QtCore.framework/Versions/A/Headers/q20type_traits.h \

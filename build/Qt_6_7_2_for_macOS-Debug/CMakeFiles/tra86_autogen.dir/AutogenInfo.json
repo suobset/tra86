@@ -307,6 +307,12 @@
 			"MU",
 			"EWIEGA46WW/moc_tra86.cpp",
 			null
+		],
+		[
+			"/Users/kushagrasrivastava/Documents/tra86/tra86_backend.h",
+			"MU",
+			"EWIEGA46WW/moc_tra86_backend.cpp",
+			null
 		]
 	],
 	"HEADER_EXTENSIONS" : [ "h", "hh", "h++", "hm", "hpp", "hxx", "in", "txx" ],
@@ -367,7 +373,12 @@
 	"SOURCES" : 
 	[
 		[ "/Users/kushagrasrivastava/Documents/tra86/main.cpp", "MU", null ],
-		[ "/Users/kushagrasrivastava/Documents/tra86/tra86.cpp", "MU", null ]
+		[ "/Users/kushagrasrivastava/Documents/tra86/tra86.cpp", "MU", null ],
+		[
+			"/Users/kushagrasrivastava/Documents/tra86/tra86_backend.cpp",
+			"MU",
+			null
+		]
 	],
 	"UIC_OPTIONS" : [],
 	"UIC_SEARCH_PATHS" : [],

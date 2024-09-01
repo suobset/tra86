@@ -46,6 +46,7 @@ set(OLD_GLOB
   "/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/tra86_autogen/mocs_compilation.cpp"
   "/Users/kushagrasrivastava/Documents/tra86/main.cpp"
   "/Users/kushagrasrivastava/Documents/tra86/tra86.cpp"
+  "/Users/kushagrasrivastava/Documents/tra86/tra86_backend.cpp"
   )
 if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
   message("-- GLOB mismatch!")
@@ -67,6 +68,7 @@ set(OLD_GLOB
   "/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/tra86_autogen/include/ui_tra86.h"
   "/Users/kushagrasrivastava/Documents/tra86/build/Qt_6_7_2_for_macOS-Debug/tra86_autogen/moc_predefs.h"
   "/Users/kushagrasrivastava/Documents/tra86/tra86.h"
+  "/Users/kushagrasrivastava/Documents/tra86/tra86_backend.h"
   )
 if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
   message("-- GLOB mismatch!")
