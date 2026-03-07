@@ -47,6 +47,7 @@ struct Tra86App {
     worker: BackendWorker,
     previous_registers: Option<RegisterBank>,
     previous_sp: Option<i64>,
+    last_traced_ip: Option<u64>,
     trace: Vec<TraceEvent>,
     recents: RecentSessions,
 }
@@ -68,6 +69,7 @@ impl Default for Tra86App {
             worker,
             previous_registers: None,
             previous_sp: None,
+            last_traced_ip: None,
             trace: Vec::new(),
             recents,
         }
@@ -102,6 +104,7 @@ impl Tra86App {
                 self.trace.clear();
                 self.ui.trace.clear();
                 self.ui.frames.clear();
+                self.last_traced_ip = None;
                 self.ui.status_line = format!("Switched backend to {choice:?}");
             }
             UiEvent::OpenExecutablePicker => {
@@ -176,6 +179,9 @@ impl Tra86App {
                 self.ui.memory_base_input = format!("0x{addr:x}");
                 self.worker.send(BackendCommand::JumpMemory(addr));
             }
+            UiEvent::JumpDisassembly(addr) => {
+                self.worker.send(BackendCommand::JumpDisassembly(addr));
+            }
             UiEvent::ClearOutput => self.ui.output_lines.clear(),
             UiEvent::ClearTrace => {
                 self.trace.clear();
@@ -203,12 +209,18 @@ impl Tra86App {
                 self.ui.threads = snapshot.threads;
                 self.ui.frames = snapshot.frames;
                 self.ui.disassembly = snapshot.disassembly;
-                self.ui.function_rows = build_function_rows(&self.ui.disassembly);
+                self.ui.function_rows = snapshot.function_rows;
                 self.ui.breakpoints = snapshot.breakpoints;
                 self.ui.memory_map_lines = snapshot.memory_map_lines;
                 self.ui.memory_bytes = snapshot.memory_bytes;
                 self.ui.output_lines.extend(snapshot.output_lines);
                 self.ui.analysis_lines = build_analysis_lines(&self.ui.disassembly, &self.trace);
+                let current_line = self
+                    .ui
+                    .disassembly
+                    .iter()
+                    .find(|line| line.is_current)
+                    .cloned();
 
                 if let Some(registers) = snapshot.registers {
                     let diff = compute_register_delta(&registers, self.previous_registers.as_ref());
@@ -220,9 +232,47 @@ impl Tra86App {
                         _ => 0,
                     };
 
-                    if let Some(current_line) =
-                        self.ui.disassembly.iter().find(|line| line.is_current)
-                    {
+                    if let Some(current_line) = current_line.as_ref() {
+                        if self.last_traced_ip != Some(current_line.address) {
+                            let record = InstructionRecord {
+                                address: current_line.address,
+                                bytes: current_line.bytes.clone(),
+                                mnemonic: current_line.mnemonic.clone(),
+                                operands: current_line.operands.clone(),
+                                symbol: current_line.function.as_ref().map(|name| SymbolInfo {
+                                    name: name.clone(),
+                                    module: None,
+                                    offset: 0,
+                                }),
+                                source: current_line.source.clone(),
+                            };
+
+                            let delta =
+                                build_delta(&current_line.mnemonic, diff, sp_delta, Vec::new());
+                            let event = TraceEvent {
+                                timestamp: Utc::now(),
+                                thread_id: registers.thread_id,
+                                instruction: record,
+                                stop_reason: self.ui.stop_reason.clone(),
+                                delta: Some(delta),
+                            };
+                            self.trace.push(event);
+                            self.last_traced_ip = Some(current_line.address);
+                            if self.trace.len() > 2_000 {
+                                let drop_count = self.trace.len() - 2_000;
+                                self.trace.drain(0..drop_count);
+                            }
+                            self.ui.trace = self.trace.clone();
+                            self.ui.analysis_lines =
+                                build_analysis_lines(&self.ui.disassembly, &self.trace);
+                        }
+                    }
+
+                    self.previous_sp = current_sp;
+                    self.previous_registers = Some(registers.clone());
+                    self.ui.registers = Some(registers);
+                } else if let Some(current_line) = current_line.as_ref() {
+                    if self.last_traced_ip != Some(current_line.address) {
                         let record = InstructionRecord {
                             address: current_line.address,
                             bytes: current_line.bytes.clone(),
@@ -235,16 +285,14 @@ impl Tra86App {
                             }),
                             source: current_line.source.clone(),
                         };
-
-                        let delta = build_delta(&current_line.mnemonic, diff, sp_delta, Vec::new());
-                        let event = TraceEvent {
+                        self.trace.push(TraceEvent {
                             timestamp: Utc::now(),
-                            thread_id: registers.thread_id,
+                            thread_id: self.ui.threads.first().map(|t| t.id).unwrap_or(1),
                             instruction: record,
                             stop_reason: self.ui.stop_reason.clone(),
-                            delta: Some(delta),
-                        };
-                        self.trace.push(event);
+                            delta: None,
+                        });
+                        self.last_traced_ip = Some(current_line.address);
                         if self.trace.len() > 2_000 {
                             let drop_count = self.trace.len() - 2_000;
                             self.trace.drain(0..drop_count);
@@ -253,10 +301,6 @@ impl Tra86App {
                         self.ui.analysis_lines =
                             build_analysis_lines(&self.ui.disassembly, &self.trace);
                     }
-
-                    self.previous_sp = current_sp;
-                    self.previous_registers = Some(registers.clone());
-                    self.ui.registers = Some(registers);
                 }
             }
             WorkerMessage::Error(error) => {
@@ -453,6 +497,7 @@ enum BackendCommand {
     ToggleBreakpoint(u64),
     RemoveBreakpoint(u64),
     JumpMemory(u64),
+    JumpDisassembly(u64),
 }
 
 #[derive(Debug)]
@@ -468,6 +513,7 @@ struct BackendSnapshot {
     threads: Vec<tra86_core::ThreadState>,
     frames: Vec<tra86_core::FrameState>,
     disassembly: Vec<DisassemblyLine>,
+    function_rows: Vec<String>,
     registers: Option<RegisterBank>,
     breakpoints: Vec<Breakpoint>,
     memory_map_lines: Vec<String>,
@@ -480,6 +526,7 @@ struct WorkerRuntime {
     backend_choice: BackendChoice,
     breakpoints: Vec<Breakpoint>,
     memory_address: u64,
+    disassembly_address: Option<u64>,
     output_lines: Vec<String>,
 }
 
@@ -490,6 +537,7 @@ impl WorkerRuntime {
             backend_choice: initial,
             breakpoints: Vec::new(),
             memory_address: 0x1000,
+            disassembly_address: None,
             output_lines: vec![format!("backend initialized: {initial:?}")],
         }
     }
@@ -570,6 +618,9 @@ impl WorkerRuntime {
             BackendCommand::JumpMemory(address) => {
                 self.memory_address = address;
             }
+            BackendCommand::JumpDisassembly(address) => {
+                self.disassembly_address = Some(address);
+            }
         }
 
         self.collect_snapshot()
@@ -588,14 +639,36 @@ impl WorkerRuntime {
             .unwrap_or_else(|_| Vec::new());
 
         let registers = backend.read_registers(current_thread_id).ok();
-        let current_ip = backend
+        let mut current_ip = backend
             .current_instruction(current_thread_id)
             .ok()
             .flatten();
 
-        let disassembly = backend
-            .disassemble(current_ip, 80)
+        let disassembly_anchor = self.disassembly_address.or(current_ip);
+        let disassembly_count = if disassembly_anchor.is_some() {
+            192
+        } else {
+            4_096
+        };
+        let mut disassembly = backend
+            .disassemble(disassembly_anchor, disassembly_count)
             .unwrap_or_else(|_| Vec::new());
+        if current_ip.is_none() {
+            current_ip = disassembly
+                .iter()
+                .find(|line| line.is_current)
+                .map(|line| line.address)
+                .or_else(|| disassembly.first().map(|line| line.address));
+        }
+        if let Some(ip) = current_ip {
+            for line in &mut disassembly {
+                line.is_current = line.address == ip;
+            }
+        }
+        let program_tree_disassembly = backend
+            .disassemble(None, 4_096)
+            .unwrap_or_else(|_| disassembly.clone());
+        let function_rows = build_function_rows(&program_tree_disassembly);
 
         let memory_map = backend.memory_map().unwrap_or_else(|_| Vec::new());
         let memory_map_lines = memory_map
@@ -617,6 +690,12 @@ impl WorkerRuntime {
             })
             .collect::<Vec<_>>();
 
+        if self.memory_address == 0x1000 {
+            if let Some(ip) = current_ip {
+                self.memory_address = ip;
+            }
+        }
+
         let memory_bytes = backend
             .read_memory(self.memory_address, 0x200)
             .unwrap_or_else(|_| Vec::new());
@@ -629,6 +708,7 @@ impl WorkerRuntime {
             threads,
             frames,
             disassembly,
+            function_rows,
             registers,
             breakpoints: self.breakpoints.clone(),
             memory_map_lines,

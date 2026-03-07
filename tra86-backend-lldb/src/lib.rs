@@ -18,7 +18,8 @@ pub struct LldbBackend {
     process: Option<LldbProcess>,
     target_program: Option<String>,
     attached_pid: Option<u32>,
-    text_base: Option<Address>,
+    text_range: Option<(Address, Address)>,
+    static_disassembly: Vec<DisassemblyLine>,
     breakpoints: Vec<Breakpoint>,
     next_breakpoint_id: BreakpointId,
     last_stop_reason: StopReason,
@@ -77,9 +78,9 @@ impl LldbBackend {
         }
     }
 
-    fn refresh_text_base(&mut self) {
+    fn refresh_text_range(&mut self) {
         if let Ok(sections) = self.run_command("image dump sections") {
-            self.text_base = parse_text_section_base(&sections);
+            self.text_range = parse_text_section_range(&sections);
         }
     }
 
@@ -97,9 +98,12 @@ impl LldbBackend {
             .arg("-o")
             .arg(format!("target create {}", lldb_quote(target)));
 
-        let dis_cmd = match address {
-            Some(addr) => format!("disassemble --start-address 0x{addr:x} --count {count}"),
-            None => format!("disassemble --name main --count {count}"),
+        let dis_cmd = match (address, self.text_range) {
+            (Some(addr), _) => format!("disassemble --start-address 0x{addr:x} --count {count}"),
+            (None, Some((start, end))) => {
+                format!("disassemble --start-address 0x{start:x} --end-address 0x{end:x}")
+            }
+            (None, None) => format!("disassemble --name main --count {count}"),
         };
         cmd.arg("-o").arg(dis_cmd);
 
@@ -113,6 +117,14 @@ impl LldbBackend {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         Ok(parse_disassembly(&stdout, &self.breakpoints))
     }
+
+    fn rebuild_static_disassembly(&mut self) {
+        let count = 12_000;
+        let rows = self.batch_disassemble(None, count).unwrap_or_default();
+        if !rows.is_empty() {
+            self.static_disassembly = rows;
+        }
+    }
 }
 
 impl Default for LldbBackend {
@@ -121,7 +133,8 @@ impl Default for LldbBackend {
             process: None,
             target_program: None,
             attached_pid: None,
-            text_base: None,
+            text_range: None,
+            static_disassembly: Vec::new(),
             breakpoints: Vec::new(),
             next_breakpoint_id: 1,
             last_stop_reason: StopReason::None,
@@ -146,7 +159,8 @@ impl DebugBackend for LldbBackend {
         let output = self.run_command(&format!("target create {}", lldb_quote(program)))?;
         self.update_stop_reason_from_output(&output);
         self.attached_pid = None;
-        self.refresh_text_base();
+        self.refresh_text_range();
+        self.rebuild_static_disassembly();
         Ok(())
     }
 
@@ -192,7 +206,8 @@ impl DebugBackend for LldbBackend {
             }
             self.update_stop_reason_from_output(&status);
         }
-        self.refresh_text_base();
+        self.refresh_text_range();
+        self.rebuild_static_disassembly();
         Ok(())
     }
 
@@ -356,6 +371,20 @@ impl DebugBackend for LldbBackend {
         address: Option<Address>,
         count: usize,
     ) -> Result<Vec<DisassemblyLine>, BackendError> {
+        if !self.static_disassembly.is_empty() {
+            let mut out = if let Some(addr) = address {
+                disassembly_window_around(&self.static_disassembly, addr, count.max(64))
+            } else {
+                self.static_disassembly
+                    .iter()
+                    .take(count.max(512))
+                    .cloned()
+                    .collect()
+            };
+            apply_breakpoint_markers(&mut out, &self.breakpoints);
+            return Ok(out);
+        }
+
         let cmd_primary = match address {
             Some(addr) => format!("disassemble --start-address 0x{addr:x} --count {count}"),
             None => format!("disassemble --pc --count {count}"),
@@ -363,19 +392,21 @@ impl DebugBackend for LldbBackend {
 
         match self.run_command(&cmd_primary) {
             Ok(output) => {
-                let parsed = parse_disassembly(&output, &self.breakpoints);
+                let mut parsed = parse_disassembly(&output, &self.breakpoints);
+                apply_breakpoint_markers(&mut parsed, &self.breakpoints);
                 if !parsed.is_empty() {
                     return Ok(parsed);
                 }
                 self.batch_disassemble(address, count)
             }
             Err(_) => {
-                if let Some(base) = self.text_base {
+                if let Some((base, _)) = self.text_range {
                     let by_base = self.run_command(&format!(
                         "disassemble --start-address 0x{base:x} --count {count}"
                     ));
                     if let Ok(output) = by_base {
-                        let parsed = parse_disassembly(&output, &self.breakpoints);
+                        let mut parsed = parse_disassembly(&output, &self.breakpoints);
+                        apply_breakpoint_markers(&mut parsed, &self.breakpoints);
                         if !parsed.is_empty() {
                             return Ok(parsed);
                         }
@@ -385,7 +416,8 @@ impl DebugBackend for LldbBackend {
                 if let Ok(fallback) =
                     self.run_command(&format!("disassemble --name main --count {count}"))
                 {
-                    let parsed = parse_disassembly(&fallback, &self.breakpoints);
+                    let mut parsed = parse_disassembly(&fallback, &self.breakpoints);
+                    apply_breakpoint_markers(&mut parsed, &self.breakpoints);
                     if !parsed.is_empty() {
                         return Ok(parsed);
                     }
@@ -985,17 +1017,55 @@ fn parse_memory_regions(output: &str) -> Vec<MemoryRegion> {
     regions
 }
 
-fn parse_text_section_base(output: &str) -> Option<Address> {
+fn parse_text_section_range(output: &str) -> Option<(Address, Address)> {
     for line in output.lines() {
-        if !(line.contains("__TEXT") || line.contains(".text")) {
+        if !(line.contains("__TEXT.__text") || line.contains(".text")) {
             continue;
         }
 
-        if let Some(addr) = extract_address_token(line) {
-            return Some(addr);
+        if let Some((start, end)) = extract_bracket_address_range(line) {
+            return Some((start, end));
         }
     }
     None
+}
+
+fn extract_bracket_address_range(line: &str) -> Option<(Address, Address)> {
+    let left = line.find('[')?;
+    let right = line[left..].find(')')? + left;
+    let range = &line[left + 1..right];
+    let (start, end) = range.split_once('-')?;
+    let start = u64::from_str_radix(start.trim().trim_start_matches("0x"), 16).ok()?;
+    let end = u64::from_str_radix(end.trim().trim_start_matches("0x"), 16).ok()?;
+    Some((start, end))
+}
+
+fn disassembly_window_around(
+    all: &[DisassemblyLine],
+    center: Address,
+    count: usize,
+) -> Vec<DisassemblyLine> {
+    if all.is_empty() {
+        return Vec::new();
+    }
+
+    let idx = all
+        .iter()
+        .position(|line| line.address >= center)
+        .unwrap_or(all.len().saturating_sub(1));
+    let half = count / 2;
+    let start = idx.saturating_sub(half);
+    let end = (start + count).min(all.len());
+    all[start..end].to_vec()
+}
+
+fn apply_breakpoint_markers(lines: &mut [DisassemblyLine], breakpoints: &[Breakpoint]) {
+    for line in lines {
+        line.has_breakpoint = breakpoints.iter().any(|bp| {
+            bp.enabled
+                && matches!(bp.location, BreakpointLocation::Address(addr) if addr == line.address)
+        });
+    }
 }
 
 fn parse_pc_from_register_output(output: &str) -> Option<u64> {

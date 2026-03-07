@@ -15,6 +15,7 @@ pub enum BackendChoice {
 pub enum BottomTab {
     Stack,
     Memory,
+    Breakpoints,
     Trace,
     Analysis,
     Output,
@@ -37,6 +38,7 @@ pub enum UiEvent {
     ToggleBreakpoint(Address),
     RemoveBreakpoint(u64),
     JumpMemory(Address),
+    JumpDisassembly(Address),
     ClearOutput,
     ClearTrace,
     SetBottomTab(BottomTab),
@@ -101,7 +103,7 @@ pub fn render(ctx: &egui::Context, model: &mut UiModel) -> Vec<UiEvent> {
 
     handle_shortcuts(ctx, &mut events);
     top_bar(ctx, model, &mut events);
-    left_session_panel(ctx, model);
+    left_session_panel(ctx, model, &mut events);
     right_registers_panel(ctx, model, &mut events);
     bottom_panel(ctx, model, &mut events);
     center_disassembly(ctx, model, &mut events);
@@ -207,6 +209,10 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
                 }
                 if ui.button("Trace Tab").clicked() {
                     events.push(UiEvent::SetBottomTab(BottomTab::Trace));
+                    ui.close_menu();
+                }
+                if ui.button("Breakpoints Tab").clicked() {
+                    events.push(UiEvent::SetBottomTab(BottomTab::Breakpoints));
                     ui.close_menu();
                 }
                 if ui.button("Output Tab").clicked() {
@@ -325,86 +331,103 @@ fn control_buttons(ui: &mut egui::Ui, events: &mut Vec<UiEvent>) {
     }
 }
 
-fn left_session_panel(ctx: &egui::Context, model: &UiModel) {
+fn left_session_panel(ctx: &egui::Context, model: &UiModel, events: &mut Vec<UiEvent>) {
     egui::SidePanel::left("threads_left")
         .default_width(260.0)
         .show(ctx, |ui| {
+            let total_height = ui.available_height().max(300.0);
+            let threads_h = (total_height * 0.26).max(100.0);
+            let frames_h = (total_height * 0.26).max(100.0);
+            let tree_h = (total_height - threads_h - frames_h - 16.0).max(120.0);
+
             ui.heading("Threads");
             ui.separator();
-            ScrollArea::vertical()
-                .id_salt("threads_list_scroll")
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    for thread in &model.threads {
-                        let text = format!(
-                            "#{} {} @ {}",
-                            thread.id,
-                            thread.name.as_deref().unwrap_or("unnamed"),
-                            thread
-                                .instruction_pointer
-                                .map(|v| format!("0x{v:016x}"))
-                                .unwrap_or_else(|| "n/a".to_string())
-                        );
-                        let color = if thread.is_current {
-                            Color32::LIGHT_BLUE
-                        } else {
-                            Color32::GRAY
-                        };
-                        ui.label(RichText::new(text).color(color));
-                        ui.small(format!(
-                            "status={:?} reason={:?}",
-                            thread.status, thread.stop_reason
-                        ));
-                        ui.separator();
-                    }
-                    if model.threads.is_empty() {
-                        ui.label("No threads");
-                    }
-                });
-
-            ui.heading("Frames");
-            ScrollArea::vertical()
-                .id_salt("frames_list_scroll")
-                .show(ui, |ui| {
-                    for frame in &model.frames {
-                        let fn_name = frame
-                            .function
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string());
-                        ui.label(
-                            RichText::new(format!(
-                                "#{} 0x{:016x} {}",
-                                frame.index, frame.instruction_pointer, fn_name
-                            ))
-                            .monospace(),
-                        );
-                        if let Some(source) = &frame.source {
-                            ui.small(format!("{}:{}", source.file, source.line));
+            ui.allocate_ui(egui::vec2(ui.available_width(), threads_h), |ui| {
+                ScrollArea::vertical()
+                    .id_salt("threads_list_scroll")
+                    .show(ui, |ui| {
+                        for thread in &model.threads {
+                            let text = format!(
+                                "#{} {} @ {}",
+                                thread.id,
+                                thread.name.as_deref().unwrap_or("unnamed"),
+                                thread
+                                    .instruction_pointer
+                                    .map(|v| format!("0x{v:016x}"))
+                                    .unwrap_or_else(|| "n/a".to_string())
+                            );
+                            let color = if thread.is_current {
+                                Color32::LIGHT_BLUE
+                            } else {
+                                Color32::GRAY
+                            };
+                            ui.label(RichText::new(text).color(color));
+                            ui.small(format!(
+                                "status={:?} reason={:?}",
+                                thread.status, thread.stop_reason
+                            ));
+                            ui.separator();
                         }
-                    }
-                    if model.frames.is_empty() {
-                        ui.label("No frames");
-                    }
-                });
+                        if model.threads.is_empty() {
+                            ui.label("No threads");
+                        }
+                    });
+            });
+
+            ui.separator();
+            ui.heading("Frames");
+            ui.allocate_ui(egui::vec2(ui.available_width(), frames_h), |ui| {
+                ScrollArea::vertical()
+                    .id_salt("frames_list_scroll")
+                    .show(ui, |ui| {
+                        for frame in &model.frames {
+                            let fn_name = frame
+                                .function
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+                            ui.label(
+                                RichText::new(format!(
+                                    "#{} 0x{:016x} {}",
+                                    frame.index, frame.instruction_pointer, fn_name
+                                ))
+                                .monospace(),
+                            );
+                            if let Some(source) = &frame.source {
+                                ui.small(format!("{}:{}", source.file, source.line));
+                            }
+                        }
+                        if model.frames.is_empty() {
+                            ui.label("No frames");
+                        }
+                    });
+            });
 
             ui.separator();
             ui.heading("Program Tree");
-            ScrollArea::vertical()
-                .id_salt("program_tree_scroll")
-                .max_height(160.0)
-                .show(ui, |ui| {
-                    if model.function_rows.is_empty() {
-                        ui.label("No functions indexed");
-                    } else {
-                        for row in &model.function_rows {
-                            ui.label(RichText::new(row).monospace());
+            ui.allocate_ui(egui::vec2(ui.available_width(), tree_h), |ui| {
+                ScrollArea::vertical()
+                    .id_salt("program_tree_scroll")
+                    .show(ui, |ui| {
+                        if model.function_rows.is_empty() {
+                            ui.label("No functions indexed");
+                        } else {
+                            for row in &model.function_rows {
+                                let clicked = ui
+                                    .selectable_label(false, RichText::new(row).monospace())
+                                    .clicked();
+                                if clicked {
+                                    if let Some(address) = parse_address_from_row(row) {
+                                        events.push(UiEvent::JumpDisassembly(address));
+                                    }
+                                }
+                            }
                         }
-                    }
-                });
+                    });
+            });
         });
 }
 
-fn right_registers_panel(ctx: &egui::Context, model: &UiModel, events: &mut Vec<UiEvent>) {
+fn right_registers_panel(ctx: &egui::Context, model: &UiModel, _events: &mut Vec<UiEvent>) {
     egui::SidePanel::right("registers_right")
         .default_width(330.0)
         .show(ctx, |ui| {
@@ -417,49 +440,29 @@ fn right_registers_panel(ctx: &egui::Context, model: &UiModel, events: &mut Vec<
                 .map(|d| (d.name.as_str(), d))
                 .collect();
 
-            ScrollArea::vertical()
-                .id_salt("registers_scroll")
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    if let Some(bank) = &model.registers {
-                        for reg in &bank.registers {
-                            let changed = diffs.contains_key(reg.name.as_str());
-                            let text = format!("{:>8}  {}", reg.name, reg.value);
-                            let color = if changed {
-                                Color32::YELLOW
-                            } else {
-                                Color32::LIGHT_GRAY
-                            };
-                            ui.label(RichText::new(text).monospace().color(color));
-                        }
-                    } else {
-                        ui.label("No register bank loaded");
-                    }
-                });
+            let total_height = ui.available_height().max(260.0);
+            let registers_h = (total_height * 0.98).max(120.0);
 
-            ui.separator();
-            ui.heading("Breakpoints");
-            ScrollArea::vertical()
-                .id_salt("breakpoints_scroll")
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for bp in &model.breakpoints {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("#{}", bp.id));
-                            ui.label(match &bp.location {
-                                BreakpointLocation::Address(addr) => format!("0x{addr:016x}"),
-                                BreakpointLocation::Symbol(sym) => sym.clone(),
-                            });
-                            ui.small(format!("hits {}", bp.hit_count));
-                            if ui.button("x").clicked() {
-                                events.push(UiEvent::RemoveBreakpoint(bp.id));
+            ui.allocate_ui(egui::vec2(ui.available_width(), registers_h), |ui| {
+                ScrollArea::vertical()
+                    .id_salt("registers_scroll")
+                    .show(ui, |ui| {
+                        if let Some(bank) = &model.registers {
+                            for reg in &bank.registers {
+                                let changed = diffs.contains_key(reg.name.as_str());
+                                let text = format!("{:>8}  {}", reg.name, reg.value);
+                                let color = if changed {
+                                    Color32::YELLOW
+                                } else {
+                                    Color32::LIGHT_GRAY
+                                };
+                                ui.label(RichText::new(text).monospace().color(color));
                             }
-                        });
-                    }
-                    if model.breakpoints.is_empty() {
-                        ui.label("No breakpoints");
-                    }
-                });
+                        } else {
+                            ui.label("No register bank loaded");
+                        }
+                    });
+            });
         });
 }
 
@@ -527,6 +530,7 @@ fn bottom_panel(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEve
             ui.horizontal(|ui| {
                 tab_button(ui, model, BottomTab::Stack, "Stack");
                 tab_button(ui, model, BottomTab::Memory, "Memory");
+                tab_button(ui, model, BottomTab::Breakpoints, "Breakpoints");
                 tab_button(ui, model, BottomTab::Trace, "Trace");
                 tab_button(ui, model, BottomTab::Analysis, "Analysis");
                 tab_button(ui, model, BottomTab::Output, "Output");
@@ -536,6 +540,7 @@ fn bottom_panel(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEve
             match model.bottom_tab {
                 BottomTab::Stack => render_stack(ui, model, events),
                 BottomTab::Memory => render_memory(ui, model, events),
+                BottomTab::Breakpoints => render_breakpoints(ui, model, events),
                 BottomTab::Trace => render_trace(ui, model),
                 BottomTab::Analysis => render_analysis(ui, model),
                 BottomTab::Output => render_output(ui, model),
@@ -679,6 +684,30 @@ fn render_trace(ui: &mut egui::Ui, model: &UiModel) {
         });
 }
 
+fn render_breakpoints(ui: &mut egui::Ui, model: &UiModel, events: &mut Vec<UiEvent>) {
+    ui.heading("Breakpoints");
+    ScrollArea::vertical()
+        .id_salt("breakpoints_bottom_scroll")
+        .show(ui, |ui| {
+            for bp in &model.breakpoints {
+                ui.horizontal(|ui| {
+                    ui.label(format!("#{}", bp.id));
+                    ui.label(match &bp.location {
+                        BreakpointLocation::Address(addr) => format!("0x{addr:016x}"),
+                        BreakpointLocation::Symbol(sym) => sym.clone(),
+                    });
+                    ui.small(format!("hits {}", bp.hit_count));
+                    if ui.button("remove").clicked() {
+                        events.push(UiEvent::RemoveBreakpoint(bp.id));
+                    }
+                });
+            }
+            if model.breakpoints.is_empty() {
+                ui.label("No breakpoints");
+            }
+        });
+}
+
 fn render_trace_row(ui: &mut egui::Ui, entry: &TraceEvent) {
     let ts = local_timestamp(entry.timestamp);
     let mut extra = String::new();
@@ -758,6 +787,12 @@ fn parse_address(input: &str) -> Option<Address> {
     } else {
         trimmed.parse::<u64>().ok()
     }
+}
+
+fn parse_address_from_row(row: &str) -> Option<Address> {
+    row.split_whitespace()
+        .find(|part| part.starts_with("0x"))
+        .and_then(parse_address)
 }
 
 fn parse_register_addr(bank: &RegisterBank, name: &str) -> Option<Address> {
