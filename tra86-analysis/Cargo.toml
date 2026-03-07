@@ -1,0 +1,9 @@
+[package]
+name = "tra86-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tra86-core = { path = "../tra86-core" }

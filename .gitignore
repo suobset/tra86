@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Local runtime/session artifacts
+recent_sessions.json
+
+# macOS
+.DS_Store
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo

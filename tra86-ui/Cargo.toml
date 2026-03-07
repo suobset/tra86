@@ -1,0 +1,15 @@
+[package]
+name = "tra86-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tra86-core = { path = "../tra86-core" }
+tra86-backend = { path = "../tra86-backend" }
+tra86-analysis = { path = "../tra86-analysis" }
+egui.workspace = true
+egui_extras.workspace = true
+egui_dock.workspace = true
+chrono.workspace = true

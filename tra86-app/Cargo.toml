@@ -1,0 +1,22 @@
+[package]
+name = "tra86-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tra86-core = { path = "../tra86-core" }
+tra86-backend = { path = "../tra86-backend" }
+tra86-backend-lldb = { path = "../tra86-backend-lldb" }
+tra86-analysis = { path = "../tra86-analysis" }
+tra86-ui = { path = "../tra86-ui" }
+eframe.workspace = true
+egui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+rfd = "0.15"
