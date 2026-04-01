@@ -4,6 +4,7 @@
 
 # Local runtime/session artifacts
 recent_sessions.json
+fixtures/native/build/
 
 # macOS
 .DS_Store
