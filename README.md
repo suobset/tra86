@@ -1,155 +1,79 @@
 # tra86
 
-`tra86` is a pure Rust desktop Assembly Tracer Analyzer built around a normalized execution model and pluggable backend architecture.
+`tra86` is a Rust desktop assembly tracer/debugger experiment. The direction is serious. The current implementation is not yet serious enough.
 
-It is GUI-first, disassembly-centered, and designed to feel like a lightweight live execution analysis tool for macOS and Linux, with Windows support planned in the backend architecture.
+As of 2026-03-31, this repo compiles, the app launches, and the LLDB path can drive a real target, but reliability is still below the bar for a systems tool. The most honest status report is [`AUDIT.md`](./AUDIT.md).
 
-## Workspace layout
+## Current Status
 
-- `tra86-app`: eframe/egui desktop binary, backend worker thread, session persistence
-- `tra86-core`: backend-independent execution/domain model types
-- `tra86-backend`: backend trait, backend-independent errors, backend orchestrator, mock backend
-- `tra86-backend-lldb`: LLDB backend adapter (isolated LLDB integration)
-- `tra86-analysis`: instruction delta + classification analysis helpers
-- `tra86-ui`: reusable egui panels/widgets and UI event model
+What is verified right now:
 
-## Architecture
+- `cargo check` passes
+- `cargo test` passes, but there are effectively no meaningful tests yet
+- `cargo run -p tra86-app` launches the desktop app
+- the LLDB smoke binary can launch and disassemble a real fixture program
 
-### Data model
+What is not yet true:
 
-All runtime state is represented using normalized types in `tra86-core`, including:
+- this is not a production-ready tracer/debugger
+- the backend is not yet robust across common failure cases
+- the analysis layer is still thin
+- the architecture still contains a few abstractions that overpromise capability
 
-- `DebugSession`
-- `ProcessState`, `ThreadState`, `FrameState`
-- `RegisterBank`, `RegisterValue`, `RegisterDiff`
-- `MemoryRegion`, `MemorySnapshot`
-- `Breakpoint`, `Watchpoint`
-- `InstructionRecord`, `DisassemblyLine`
-- `StopReason`, `TraceEvent`, `ExecutionDelta`
-- `SymbolInfo`, `SourceLocation`
+## Workspace
 
-This keeps UI and analysis logic backend-agnostic.
+- `tra86-core`: normalized execution/domain types
+- `tra86-backend`: backend trait, errors, mock backend, thin backend wrapper
+- `tra86-backend-lldb`: LLDB-specific adapter and parsers
+- `tra86-analysis`: register delta and instruction classification helpers
+- `tra86-ui`: egui rendering and UI event model
+- `tra86-app`: application wiring, worker thread, session persistence
 
-### Backend abstraction
+## What Already Exists
 
-`tra86-backend::DebugBackend` defines a stable interface for:
+- egui desktop shell
+- backend worker thread to keep debugger work off the UI thread
+- disassembly, registers, frames, threads, breakpoints, memory, trace panes
+- LLDB adapter behind a Rust trait instead of embedding LLDB types in the UI
+- a mock backend that is useful for UI work but currently makes the product look farther along than it is
 
-- launching/attaching/detaching/killing
-- continue/step/pause controls
-- registers, memory, threads, frames
-- breakpoints
-- disassembly + symbol/source lookup
-- stop reason and current instruction query
+## Biggest Current Problems
 
-`BackendOrchestrator` owns a boxed backend and enables runtime backend swapping.
+- the LLDB adapter is text-protocol brittle
+- register handling is architecture-fragile
+- error handling often hides backend faults by returning empty UI data
+- tests are almost nonexistent
+- some abstractions are more decorative than proven
 
-### UI/worker split
+## Build And Run
 
-`tra86-app` runs backend operations in a dedicated worker thread over channels. The egui thread only renders and dispatches intents. This prevents memory/disassembly operations from freezing the desktop UI.
+Prerequisites:
 
-### Analysis layer
-
-`tra86-analysis` computes per-step annotations:
-
-- changed registers
-- stack pointer movement
-- control-flow class (linear/jump/call/return/syscall)
-- instruction hints (prologue/epilogue/branch/syscall)
-
-These annotations are shown in instruction history rows.
-
-## MVP capabilities
-
-Implemented in the app shell with the mock backend and shared model:
-
-- executable path + args input with native file picker
-- launch and attach actions
-- disassembly-first center pane with current-IP highlight
-- step into/over/out, continue, pause, stop, restart controls
-- breakpoint toggle from disassembly + right-side breakpoint list
-- register pane with changed-register highlighting
-- thread + frame views in left pane (stack frame context)
-- memory map + hex/ascii memory inspector + numeric interpretations
-- stack-oriented memory view around the selected memory address
-- trace/history pane with execution deltas
-- source correlation rendering when source info exists
-- recent session persistence (`recent_sessions.json`)
-- desktop menu bar (`File`, `Debug`, `Backend`)
-- keyboard shortcuts (`F5`, `F6`, `F10`, `F11`, `Shift+F11`, `Cmd/Ctrl+R`)
-
-## LLDB backend status
-
-`tra86-backend-lldb` is implemented as a persistent interactive LLDB process adapter behind the same `DebugBackend` trait and isolated from other crates.
-
-Current LLDB adapter supports:
-
-- launch + attach
-- continue / pause / step into / step over / step out
-- disassembly around current instruction
-- breakpoints set/remove
-- register reading
-- thread + frame listing
-- memory read/write + memory region map
-- symbol/source lookup (`image lookup`)
-
-LLDB-specific command/process handling is still fully isolated to one crate so core, analysis, and UI layers remain debugger-agnostic.
-
-## Why tra86 is not a debugger wrapper
-
-- Backend output is normalized into `tra86-core` domain types before it reaches UI/analysis.
-- Analysis (`ExecutionDelta`) is independent of LLDB/GDB protocol formats.
-- UI speaks only `UiEvent` + normalized snapshot data, never debugger-native structures.
-- Multiple backend types are planned as peers (LLDB, GDB/MI, dbgeng, instrumentation), not plugins to a single debugger UX.
-
-## Build and run
-
-### Prerequisites
-
-- Rust stable toolchain (`cargo`)
+- Rust stable toolchain
+- LLDB installed and available on `PATH`
 - macOS or Linux desktop environment
-- LLDB installed and on `PATH` for LLDB backend usage
 
-### Commands
+Commands:
 
 ```bash
 cargo check
+cargo test
 cargo run -p tra86-app
 ```
 
-## Screenshots
+Useful smoke check:
 
-Screenshots were not captured in this headless build environment.
+```bash
+cargo run -p tra86-app --bin lldb_smoke -- /path/to/debuggable/binary
+```
 
-When running locally, recommended captures:
+## Direction
 
-- `docs/screenshots/disassembly-main.png`
-- `docs/screenshots/memory-trace.png`
-- `docs/screenshots/register-delta.png`
+The intended product is still the same:
 
-## Roadmap
+- Rust-native desktop application
+- backend-agnostic normalized execution model
+- real tracing/debugging on native binaries
+- strong debugger fidelity before UI polish
 
-### Backends
-
-- Linux-focused GDB/MI backend crate behind `DebugBackend`
-- Persistent LLDB session driver (interactive process control, robust event stream)
-- Windows backend crate (`dbgeng`/`cdb`-style adapter) using the same normalized model
-
-### Architecture and ISA
-
-- ISA modules beyond x86_64 (AArch64 first)
-- stronger symbol/source integration and inlined frame handling
-- backend capability negotiation with finer feature flags
-
-### Trace and analysis
-
-- full trace recording mode and trace export/import
-- trace replay/time navigation groundwork
-- memory write tracking with richer deltas
-- basic block/function heatmaps
-- watch expressions and dataflow-oriented views
-
-## Platform assumptions
-
-- First-class target: macOS + Linux
-- Windows support is intentionally designed into traits/models but not yet fully implemented
-- Pure Rust stack only (no Electron/Tauri/Java/web frontend)
+The next work should focus on backend reliability, integration tests, typed failure handling, and a session model that does not drift out of sync when the target process does something inconvenient.

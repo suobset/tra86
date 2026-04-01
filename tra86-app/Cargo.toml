@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+default-run = "tra86-app"
 
 [dependencies]
 tra86-core = { path = "../tra86-core" }
