@@ -10,3 +10,4 @@ tra86-core = { path = "../tra86-core" }
 tra86-backend = { path = "../tra86-backend" }
 thiserror.workspace = true
 serde_json.workspace = true
+tracing.workspace = true

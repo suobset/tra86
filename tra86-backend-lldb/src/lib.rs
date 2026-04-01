@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -62,7 +63,7 @@ impl LldbBackend {
     }
 
     fn update_stop_reason_from_output(&mut self, output: &str) {
-        for line in output.lines() {
+        for line in output_lines(output) {
             if let Some(reason) = parse_stop_reason_line(line) {
                 self.last_stop_reason = reason;
             }
@@ -148,15 +149,14 @@ impl DebugBackend for LldbBackend {
     }
 
     fn open_target(&mut self, program: &str) -> Result<(), BackendError> {
-        if !Path::new(program).exists() {
-            return Err(BackendError::InvalidRequest(format!(
-                "program does not exist: {program}"
-            )));
-        }
-        self.target_program = Some(program.to_string());
+        let normalized_program = normalize_target_path(program)?;
+        self.target_program = Some(normalized_program.clone());
         self.ensure_process()?;
         let _ = self.run_command("target delete 0");
-        let output = self.run_command(&format!("target create {}", lldb_quote(program)))?;
+        let output = self.run_command(&format!(
+            "target create {}",
+            lldb_quote(&normalized_program)
+        ))?;
         self.update_stop_reason_from_output(&output);
         self.attached_pid = None;
         self.refresh_text_range();
@@ -165,21 +165,16 @@ impl DebugBackend for LldbBackend {
     }
 
     fn launch(&mut self, request: LaunchRequest) -> Result<(), BackendError> {
-        if !Path::new(&request.target.program).exists() {
-            return Err(BackendError::InvalidRequest(format!(
-                "program does not exist: {}",
-                request.target.program
-            )));
-        }
+        let normalized_program = normalize_target_path(&request.target.program)?;
 
-        self.target_program = Some(request.target.program.clone());
+        self.target_program = Some(normalized_program.clone());
         self.ensure_process()?;
 
         let _ = self.run_command("target delete 0");
 
         let mut commands = vec![format!(
             "target create {}",
-            lldb_quote(&request.target.program)
+            lldb_quote(&normalized_program)
         )];
 
         commands.push("breakpoint set --name main".to_string());
@@ -264,15 +259,13 @@ impl DebugBackend for LldbBackend {
     }
 
     fn read_registers(&mut self, thread_id: ThreadId) -> Result<RegisterBank, BackendError> {
-        let _ = self.ensure_thread_selected(thread_id);
-        let explicit = "register read rip rsp rbp rflags rax rbx rcx rdx rsi rdi r8 r9 r10 r11 r12 r13 r14 r15 pc sp fp x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15 x16 x17 x18 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29 x30 cpsr";
-        let output = self
-            .run_command(explicit)
-            .or_else(|_| self.run_command("register read --all"))?;
+        self.ensure_thread_selected(thread_id)?;
+        let output = self.run_command("register read --all")?;
         let mut registers = parse_registers(&output);
         if registers.is_empty() {
             registers = parse_registers_loose(&output);
         }
+        dedupe_registers(&mut registers);
         if registers.is_empty() {
             if let Ok(rows) = self.disassemble(None, 1) {
                 if let Some(row) = rows.first() {
@@ -455,8 +448,14 @@ impl DebugBackend for LldbBackend {
         thread_id: ThreadId,
     ) -> Result<Option<Address>, BackendError> {
         self.ensure_thread_selected(thread_id)?;
-        let output = self.run_command("register read rip pc eip")?;
-        Ok(parse_pc_from_register_output(&output))
+        for command in ["register read pc", "register read rip", "register read eip"] {
+            if let Ok(output) = self.run_command(command) {
+                if let Some(pc) = parse_pc_from_register_output(&output) {
+                    return Ok(Some(pc));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn current_stop_reason(&mut self) -> Result<StopReason, BackendError> {
@@ -506,8 +505,10 @@ impl DebugBackend for LldbBackend {
 impl Drop for LldbBackend {
     fn drop(&mut self) {
         if let Some(process) = self.process.as_mut() {
-            let _ = process.run_command("quit");
+            let _ = process.stdin.write_all(b"quit\n");
+            let _ = process.stdin.flush();
             let _ = process.child.kill();
+            let _ = process.child.wait();
         }
     }
 }
@@ -581,6 +582,7 @@ impl LldbProcess {
     }
 
     fn run_command(&mut self, command: &str) -> Result<String, BackendError> {
+        tracing::debug!(target: "tra86_backend_lldb", %command, "sending LLDB command");
         while self.lines_rx.try_recv().is_ok() {}
 
         self.stdin
@@ -600,13 +602,20 @@ impl LldbProcess {
             .map_err(|err| BackendError::Io(format!("failed to flush lldb stdin: {err}")))?;
 
         let mut out = String::new();
+        let mut saw_marker = false;
         loop {
-            let line = self
-                .lines_rx
-                .recv_timeout(Duration::from_secs(20))
-                .map_err(|_| BackendError::Timeout)?;
+            let line = match self.lines_rx.recv_timeout(if saw_marker {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(20)
+            }) {
+                Ok(line) => line,
+                Err(_) if saw_marker => break,
+                Err(_) => return Err(BackendError::Timeout),
+            };
             if line.contains(CMD_DONE_MARKER) {
-                break;
+                saw_marker = true;
+                continue;
             }
             if !line.trim().is_empty() && line.trim() != "(lldb)" {
                 if !out.is_empty() {
@@ -617,14 +626,37 @@ impl LldbProcess {
         }
 
         if out.contains("error:") {
+            tracing::warn!(
+                target: "tra86_backend_lldb",
+                %command,
+                response = %out,
+                "LLDB command reported an error"
+            );
             return Err(BackendError::Protocol(out));
         }
 
+        tracing::debug!(
+            target: "tra86_backend_lldb",
+            %command,
+            response_len = out.len(),
+            "LLDB command completed"
+        );
         Ok(out)
     }
 }
 
 fn spawn_lldb_with_pty_fallback() -> Result<Child, BackendError> {
+    let direct = Command::new("lldb")
+        .arg("--no-lldbinit")
+        .arg("-Q")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    if let Ok(child) = direct {
+        return Ok(child);
+    }
+
     #[cfg(target_os = "macos")]
     {
         let via_script = Command::new("script")
@@ -658,14 +690,9 @@ fn spawn_lldb_with_pty_fallback() -> Result<Child, BackendError> {
         }
     }
 
-    Command::new("lldb")
-        .arg("--no-lldbinit")
-        .arg("-Q")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| BackendError::Unavailable(format!("failed to start lldb process: {err}")))
+    Err(BackendError::Unavailable(
+        "failed to start lldb process".to_string(),
+    ))
 }
 
 fn lldb_quote(input: &str) -> String {
@@ -673,8 +700,28 @@ fn lldb_quote(input: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+fn output_lines(output: &str) -> impl Iterator<Item = &str> {
+    output
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+}
+
+fn normalize_target_path(program: &str) -> Result<String, BackendError> {
+    let path = Path::new(program);
+    if !path.exists() {
+        return Err(BackendError::InvalidRequest(format!(
+            "program does not exist: {program}"
+        )));
+    }
+
+    fs::canonicalize(path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|err| BackendError::Io(format!("failed to canonicalize {program}: {err}")))
+}
+
 fn parse_pid(output: &str) -> Option<u32> {
-    output.lines().find_map(|line| {
+    output_lines(output).find_map(|line| {
         if !line.contains("Process") {
             return None;
         }
@@ -685,7 +732,7 @@ fn parse_pid(output: &str) -> Option<u32> {
 }
 
 fn parse_breakpoint_id(output: &str) -> Option<u64> {
-    output.lines().find_map(|line| {
+    output_lines(output).find_map(|line| {
         if !line.contains("Breakpoint") {
             return None;
         }
@@ -718,7 +765,7 @@ fn parse_stop_reason_line(line: &str) -> Option<StopReason> {
 
 fn parse_registers(output: &str) -> Vec<RegisterValue> {
     let mut out = Vec::new();
-    for line in output.lines() {
+    for line in output_lines(output) {
         let Some((raw_name, raw_value)) = line.split_once('=') else {
             continue;
         };
@@ -749,9 +796,14 @@ fn parse_registers(output: &str) -> Vec<RegisterValue> {
     out
 }
 
+fn dedupe_registers(registers: &mut Vec<RegisterValue>) {
+    let mut seen = std::collections::BTreeSet::new();
+    registers.retain(|reg| seen.insert(reg.name.clone()));
+}
+
 fn parse_registers_loose(output: &str) -> Vec<RegisterValue> {
     let mut out = Vec::new();
-    for line in output.lines() {
+    for line in output_lines(output) {
         let Some((left, right)) = line.split_once('=') else {
             continue;
         };
@@ -800,7 +852,7 @@ fn register_role(name: &str) -> RegisterRole {
 
 fn parse_threads(output: &str, default_reason: StopReason) -> Vec<ThreadState> {
     let mut out = Vec::new();
-    for line in output.lines() {
+    for line in output_lines(output) {
         if !line.contains("thread #") {
             continue;
         }
@@ -844,7 +896,7 @@ fn parse_threads(output: &str, default_reason: StopReason) -> Vec<ThreadState> {
 fn parse_frames(output: &str, thread_id: ThreadId) -> Vec<FrameState> {
     let mut frames = Vec::new();
 
-    for line in output.lines() {
+    for line in output_lines(output) {
         if !line.contains("frame #") {
             continue;
         }
@@ -859,9 +911,13 @@ fn parse_frames(output: &str, thread_id: ThreadId) -> Vec<FrameState> {
         let ip = extract_address_token(line).unwrap_or(0);
 
         let function = line.split('`').nth(1).map(|tail| {
-            tail.split_whitespace()
+            tail.split(" at ")
                 .next()
-                .unwrap_or("unknown")
+                .unwrap_or(tail)
+                .split(" + ")
+                .next()
+                .unwrap_or(tail)
+                .trim()
                 .to_string()
         });
 
@@ -885,7 +941,7 @@ fn parse_disassembly(output: &str, breakpoints: &[Breakpoint]) -> Vec<Disassembl
     let mut out = Vec::new();
     let mut current_function: Option<String> = None;
 
-    for line in output.lines() {
+    for line in output_lines(output) {
         if line.contains('`') && line.trim_end().ends_with(':') && !line.contains("0x") {
             current_function = line
                 .split('`')
@@ -923,7 +979,7 @@ fn parse_disassembly(output: &str, breakpoints: &[Breakpoint]) -> Vec<Disassembl
             mnemonic,
             operands,
             function: current_function.clone(),
-            source: None,
+            source: parse_source_location(line),
             branch_target,
             is_current,
             has_breakpoint,
@@ -958,10 +1014,14 @@ fn extract_address_token(line: &str) -> Option<Address> {
 
 fn parse_memory_bytes(output: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    for line in output.lines() {
+    for line in output_lines(output) {
         for token in line.split_whitespace() {
-            if token.starts_with("0x") && token.len() == 4 {
-                if let Ok(byte) = u8::from_str_radix(token.trim_start_matches("0x"), 16) {
+            let normalized = token
+                .trim_start_matches("0x")
+                .trim_matches(|c: char| !c.is_ascii_hexdigit());
+
+            if normalized.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(normalized, 16) {
                     out.push(byte);
                 }
             }
@@ -973,7 +1033,7 @@ fn parse_memory_bytes(output: &str) -> Vec<u8> {
 fn parse_memory_regions(output: &str) -> Vec<MemoryRegion> {
     let mut regions = Vec::new();
 
-    for line in output.lines() {
+    for line in output_lines(output) {
         if !(line.contains('[') && line.contains(')') && line.contains('-')) {
             continue;
         }
@@ -1018,7 +1078,7 @@ fn parse_memory_regions(output: &str) -> Vec<MemoryRegion> {
 }
 
 fn parse_text_section_range(output: &str) -> Option<(Address, Address)> {
-    for line in output.lines() {
+    for line in output_lines(output) {
         if !(line.contains("__TEXT.__text") || line.contains(".text")) {
             continue;
         }
@@ -1076,7 +1136,7 @@ fn parse_pc_from_register_output(output: &str) -> Option<u64> {
 }
 
 fn parse_source_location(line_or_output: &str) -> Option<SourceLocation> {
-    for line in line_or_output.lines() {
+    for line in output_lines(line_or_output) {
         if let Some(rest) = line.split(" at ").nth(1) {
             let mut pieces = rest.rsplitn(3, ':').collect::<Vec<_>>();
             pieces.reverse();
@@ -1098,7 +1158,7 @@ fn parse_source_location(line_or_output: &str) -> Option<SourceLocation> {
 fn parse_symbol_info(output: &str, address: Address, module: Option<String>) -> Option<SymbolInfo> {
     let mut name: Option<String> = None;
 
-    for line in output.lines() {
+    for line in output_lines(output) {
         if line.contains("Summary:") {
             name = line
                 .split("Summary:")
@@ -1125,4 +1185,65 @@ fn parse_symbol_info(output: &str, address: Address, module: Option<String>) -> 
 fn parse_addr(value: &str) -> Option<u64> {
     let cleaned = value.trim().trim_start_matches("0x");
     u64::from_str_radix(cleaned, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_registers_handles_arm64_output() {
+        let output = "\
+      pc = 0x00000001000109c0  dyld`_dyld_start
+      sp = 0x000000016fdff4c0
+      fp = 0x0000000000000000
+      x0 = 0x0000000000000001
+    cpsr = 0x00000000
+";
+
+        let registers = parse_registers(output);
+        assert!(registers.iter().any(|reg| reg.name == "pc"));
+        assert!(registers.iter().any(|reg| reg.name == "sp"));
+        assert!(registers.iter().any(|reg| reg.name == "x0"));
+        assert!(registers.iter().any(|reg| reg.name == "cpsr"));
+    }
+
+    #[test]
+    fn parse_disassembly_handles_batch_lldb_format() {
+        let output = "\
+sample`main:
+sample[0x100000460] <+0>:   sub    sp, sp, #0x30
+sample[0x100000480] <+32>:  bl     0x1000004c8               ; twice at sample.c:4
+";
+
+        let rows = parse_disassembly(output, &[]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].function.as_deref(), Some("main"));
+        assert_eq!(rows[0].mnemonic, "sub");
+        assert_eq!(rows[1].branch_target, Some(0x1000004c8));
+        assert_eq!(rows[1].source.as_ref().map(|src| src.file.as_str()), Some("sample.c"));
+    }
+
+    #[test]
+    fn parse_frames_extracts_function_and_source() {
+        let output = "\
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+  * frame #0: 0x0000000100000478 sample`main(argc=1, argv=0x000000016fdff6b0) at sample.c:9:23
+    frame #1: 0x000000018d1ef274 libdyld.dylib`start + 284
+";
+
+        let frames = parse_frames(output, 1);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(
+            frames[0].function.as_deref(),
+            Some("main(argc=1, argv=0x000000016fdff6b0)")
+        );
+        assert_eq!(frames[0].source.as_ref().map(|src| src.file.as_str()), Some("sample.c"));
+    }
+
+    #[test]
+    fn normalize_target_path_rejects_missing_files() {
+        let err = normalize_target_path("/definitely/missing/binary").unwrap_err();
+        assert!(matches!(err, BackendError::InvalidRequest(_)));
+    }
 }

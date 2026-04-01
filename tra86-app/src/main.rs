@@ -62,7 +62,6 @@ impl Default for Tra86App {
         }
 
         let worker = BackendWorker::spawn(BackendChoice::Lldb);
-        worker.send(BackendCommand::Refresh);
 
         Self {
             ui,
@@ -627,22 +626,55 @@ impl WorkerRuntime {
     }
 
     fn collect_snapshot(&mut self) -> anyhow::Result<BackendSnapshot> {
-        let backend_name = self.orchestrator.backend_name();
-        let backend = self.orchestrator.backend_mut();
+        let backend_name = self.orchestrator.backend_name().to_string();
 
-        let stop_reason = backend.current_stop_reason().unwrap_or(StopReason::None);
+        let stop_reason = match self.orchestrator.backend_mut().current_stop_reason() {
+            Ok(reason) => reason,
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to read stop reason: {err}"));
+                StopReason::None
+            }
+        };
 
-        let threads = backend.list_threads().unwrap_or_else(|_| Vec::new());
+        let threads = match self.orchestrator.backend_mut().list_threads() {
+            Ok(threads) => threads,
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to list threads: {err}"));
+                Vec::new()
+            }
+        };
         let current_thread_id = threads.first().map(|t| t.id).unwrap_or(1);
-        let frames = backend
-            .list_frames(current_thread_id)
-            .unwrap_or_else(|_| Vec::new());
+        let frames = match self.orchestrator.backend_mut().list_frames(current_thread_id) {
+            Ok(frames) => frames,
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to list frames: {err}"));
+                Vec::new()
+            }
+        };
 
-        let registers = backend.read_registers(current_thread_id).ok();
-        let mut current_ip = backend
+        let registers = match self.orchestrator.backend_mut().read_registers(current_thread_id) {
+            Ok(registers) => Some(registers),
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to read registers: {err}"));
+                None
+            }
+        };
+        let mut current_ip = match self
+            .orchestrator
+            .backend_mut()
             .current_instruction(current_thread_id)
-            .ok()
-            .flatten();
+        {
+            Ok(ip) => ip,
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to read current instruction: {err}"));
+                None
+            }
+        };
 
         let disassembly_anchor = self.disassembly_address.or(current_ip);
         let disassembly_count = if disassembly_anchor.is_some() {
@@ -650,9 +682,18 @@ impl WorkerRuntime {
         } else {
             4_096
         };
-        let mut disassembly = backend
+        let mut disassembly = match self
+            .orchestrator
+            .backend_mut()
             .disassemble(disassembly_anchor, disassembly_count)
-            .unwrap_or_else(|_| Vec::new());
+        {
+            Ok(disassembly) => disassembly,
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to disassemble: {err}"));
+                Vec::new()
+            }
+        };
         if current_ip.is_none() {
             current_ip = disassembly
                 .iter()
@@ -665,12 +706,26 @@ impl WorkerRuntime {
                 line.is_current = line.address == ip;
             }
         }
-        let program_tree_disassembly = backend
-            .disassemble(None, 4_096)
-            .unwrap_or_else(|_| disassembly.clone());
+        let program_tree_disassembly = match self.orchestrator.backend_mut().disassemble(None, 4_096)
+        {
+            Ok(disassembly) => disassembly,
+            Err(err) => {
+                self.output_lines.push(format!(
+                    "snapshot: failed to load full program disassembly: {err}"
+                ));
+                disassembly.clone()
+            }
+        };
         let function_rows = build_function_rows(&program_tree_disassembly);
 
-        let memory_map = backend.memory_map().unwrap_or_else(|_| Vec::new());
+        let memory_map = match self.orchestrator.backend_mut().memory_map() {
+            Ok(memory_map) => memory_map,
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to read memory map: {err}"));
+                Vec::new()
+            }
+        };
         let memory_map_lines = memory_map
             .iter()
             .map(|region| {
@@ -696,9 +751,18 @@ impl WorkerRuntime {
             }
         }
 
-        let memory_bytes = backend
+        let memory_bytes = match self
+            .orchestrator
+            .backend_mut()
             .read_memory(self.memory_address, 0x200)
-            .unwrap_or_else(|_| Vec::new());
+        {
+            Ok(memory) => memory,
+            Err(err) => {
+                self.output_lines
+                    .push(format!("snapshot: failed to read memory: {err}"));
+                Vec::new()
+            }
+        };
 
         let output_lines = std::mem::take(&mut self.output_lines);
 
