@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use std::collections::BTreeMap;
 
 use tra86_core::{
@@ -15,45 +13,12 @@ pub struct LaunchRequest {
     pub target: TargetBinary,
 }
 
-pub trait BackendControl: Send + Sync {
-    fn interrupt(&self) -> Result<(), BackendError>;
-
-    fn terminate(&self) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(
-            "terminate is not implemented by this backend".to_string(),
-        ))
-    }
-}
-
-#[derive(Clone)]
-pub struct BackendControlHandle {
-    inner: Arc<dyn BackendControl>,
-}
-
-impl BackendControlHandle {
-    pub fn new(inner: Arc<dyn BackendControl>) -> Self {
-        Self { inner }
-    }
-
-    pub fn interrupt(&self) -> Result<(), BackendError> {
-        self.inner.interrupt()
-    }
-
-    pub fn terminate(&self) -> Result<(), BackendError> {
-        self.inner.terminate()
-    }
-}
-
 /// Normalized debugger/tracer backend surface used by the UI and analysis layers.
 ///
 /// Backends map native protocol concepts (LLDB, GDB/MI, dbgeng, or future instrumentation)
 /// into `tra86-core` model types so higher layers never depend on backend-specific structs.
 pub trait DebugBackend: Send {
     fn backend_name(&self) -> &'static str;
-
-    fn control_handle(&self) -> Option<BackendControlHandle> {
-        None
-    }
 
     fn open_target(&mut self, _program: &str) -> Result<(), BackendError> {
         Err(BackendError::Unsupported(

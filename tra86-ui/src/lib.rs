@@ -66,7 +66,7 @@ impl SessionStatus {
     }
 
     pub fn can_pause(&self) -> bool {
-        matches!(self.phase, SessionPhase::Running)
+        false
     }
 
     pub fn can_step(&self) -> bool {
@@ -74,8 +74,7 @@ impl SessionStatus {
     }
 
     pub fn can_stop(&self) -> bool {
-        matches!(self.phase, SessionPhase::Running)
-            || (!self.is_busy && matches!(self.phase, SessionPhase::Stopped))
+        !self.is_busy && matches!(self.phase, SessionPhase::Stopped)
     }
 
     pub fn can_refresh(&self) -> bool {
@@ -457,7 +456,7 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
                 ui.label(format!("Target: {}", model.executable_path.trim()));
             }
             ui.separator();
-            ui.label("F5 continue | F10 step over | F11 step into | Shift+F11 step out | F6 pause");
+            ui.label("F5 continue | F10 step over | F11 step into | Shift+F11 step out");
         });
 
         if let Some(error) = &model.session.last_error {

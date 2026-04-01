@@ -13,10 +13,6 @@ impl BackendOrchestrator {
         self.backend.backend_name()
     }
 
-    pub fn backend(&self) -> &dyn DebugBackend {
-        self.backend.as_ref()
-    }
-
     pub fn backend_mut(&mut self) -> &mut dyn DebugBackend {
         self.backend.as_mut()
     }

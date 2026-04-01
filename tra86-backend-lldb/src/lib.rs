@@ -4,14 +4,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
-use tra86_backend::{
-    BackendControl, BackendControlHandle, BackendError, DebugBackend, LaunchRequest,
-};
+use tra86_backend::{BackendError, DebugBackend, LaunchRequest};
 use tra86_core::{
     Address, Breakpoint, BreakpointId, BreakpointLocation, DisassemblyLine, FrameState,
     MemoryPermissions, MemoryRegion, RegisterBank, RegisterRole, RegisterValue, SourceLocation,
@@ -29,7 +24,6 @@ pub struct LldbBackend {
     breakpoints: Vec<Breakpoint>,
     next_breakpoint_id: BreakpointId,
     last_stop_reason: StopReason,
-    control: Arc<LldbControl>,
 }
 
 impl LldbBackend {
@@ -39,9 +33,7 @@ impl LldbBackend {
 
     fn ensure_process(&mut self) -> Result<&mut LldbProcess, BackendError> {
         if self.process.is_none() {
-            let process = LldbProcess::spawn()?;
-            self.control.set_debugger_pid(Some(process.child.id()));
-            self.process = Some(process);
+            self.process = Some(LldbProcess::spawn()?);
         }
         self.process
             .as_mut()
@@ -134,16 +126,6 @@ impl LldbBackend {
             self.static_disassembly = rows;
         }
     }
-
-    fn reconcile_control_state(&mut self) {
-        if matches!(
-            self.last_stop_reason,
-            StopReason::Exited(_) | StopReason::Detached
-        ) {
-            self.attached_pid = None;
-            self.control.set_target_pid(None);
-        }
-    }
 }
 
 impl Default for LldbBackend {
@@ -157,7 +139,6 @@ impl Default for LldbBackend {
             breakpoints: Vec::new(),
             next_breakpoint_id: 1,
             last_stop_reason: StopReason::None,
-            control: Arc::new(LldbControl::default()),
         }
     }
 }
@@ -165,10 +146,6 @@ impl Default for LldbBackend {
 impl DebugBackend for LldbBackend {
     fn backend_name(&self) -> &'static str {
         "lldb"
-    }
-
-    fn control_handle(&self) -> Option<BackendControlHandle> {
-        Some(BackendControlHandle::new(self.control.clone()))
     }
 
     fn open_target(&mut self, program: &str) -> Result<(), BackendError> {
@@ -182,7 +159,6 @@ impl DebugBackend for LldbBackend {
         ))?;
         self.update_stop_reason_from_output(&output);
         self.attached_pid = None;
-        self.control.set_target_pid(None);
         self.refresh_text_range();
         self.rebuild_static_disassembly();
         Ok(())
@@ -198,8 +174,6 @@ impl DebugBackend for LldbBackend {
 
         let mut commands = vec![format!("target create {}", lldb_quote(&normalized_program))];
 
-        commands.push("breakpoint set --name main".to_string());
-
         if !request.target.args.is_empty() {
             let args = request
                 .target
@@ -211,11 +185,10 @@ impl DebugBackend for LldbBackend {
             commands.push(format!("settings set target.run-args {args}"));
         }
 
-        commands.push("process launch --stop-at-entry".to_string());
+        commands.push("process launch --stop-at-user-entry".to_string());
 
         let output = self.run_commands(&commands)?;
         self.attached_pid = parse_pid(&output);
-        self.control.set_target_pid(self.attached_pid);
         self.update_stop_reason_from_output(&output);
         if let Ok(status) = self.run_command("process status") {
             if status.contains("running") {
@@ -223,7 +196,6 @@ impl DebugBackend for LldbBackend {
             }
             self.update_stop_reason_from_output(&status);
         }
-        self.reconcile_control_state();
         self.refresh_text_range();
         self.rebuild_static_disassembly();
         Ok(())
@@ -232,7 +204,6 @@ impl DebugBackend for LldbBackend {
     fn attach(&mut self, pid: u32) -> Result<(), BackendError> {
         let output = self.run_command(&format!("process attach --pid {pid}"))?;
         self.attached_pid = Some(pid);
-        self.control.set_target_pid(self.attached_pid);
         self.update_stop_reason_from_output(&output);
         Ok(())
     }
@@ -240,7 +211,6 @@ impl DebugBackend for LldbBackend {
     fn detach(&mut self) -> Result<(), BackendError> {
         let output = self.run_command("process detach")?;
         self.attached_pid = None;
-        self.control.set_target_pid(None);
         self.update_stop_reason_from_output(&output);
         self.last_stop_reason = StopReason::Detached;
         Ok(())
@@ -251,42 +221,36 @@ impl DebugBackend for LldbBackend {
         self.update_stop_reason_from_output(&output);
         self.last_stop_reason = StopReason::Exited(0);
         self.attached_pid = None;
-        self.control.set_target_pid(None);
         Ok(())
     }
 
     fn continue_exec(&mut self) -> Result<(), BackendError> {
         let output = self.run_command("process continue")?;
         self.update_stop_reason_from_output(&output);
-        self.reconcile_control_state();
         Ok(())
     }
 
     fn step_into(&mut self) -> Result<(), BackendError> {
         let output = self.run_command("thread step-in")?;
         self.update_stop_reason_from_output(&output);
-        self.reconcile_control_state();
         Ok(())
     }
 
     fn step_over(&mut self) -> Result<(), BackendError> {
         let output = self.run_command("thread step-over")?;
         self.update_stop_reason_from_output(&output);
-        self.reconcile_control_state();
         Ok(())
     }
 
     fn step_out(&mut self) -> Result<(), BackendError> {
         let output = self.run_command("thread step-out")?;
         self.update_stop_reason_from_output(&output);
-        self.reconcile_control_state();
         Ok(())
     }
 
     fn pause(&mut self) -> Result<(), BackendError> {
         let output = self.run_command("process interrupt")?;
         self.update_stop_reason_from_output(&output);
-        self.reconcile_control_state();
         Ok(())
     }
 
@@ -343,6 +307,13 @@ impl DebugBackend for LldbBackend {
         let parsed = parse_threads(&output, self.last_stop_reason.clone());
         if !parsed.is_empty() {
             return Ok(parsed);
+        }
+
+        if matches!(
+            self.last_stop_reason,
+            StopReason::Exited(_) | StopReason::Detached
+        ) {
+            return Ok(Vec::new());
         }
 
         let ip = self
@@ -491,6 +462,15 @@ impl DebugBackend for LldbBackend {
     }
 
     fn current_stop_reason(&mut self) -> Result<StopReason, BackendError> {
+        if let Ok(status) = self.run_command("process status") {
+            self.update_stop_reason_from_output(&status);
+            if matches!(
+                self.last_stop_reason,
+                StopReason::Exited(_) | StopReason::Detached
+            ) {
+                self.attached_pid = None;
+            }
+        }
         Ok(self.last_stop_reason.clone())
     }
 
@@ -542,59 +522,6 @@ impl Drop for LldbBackend {
             let _ = process.child.kill();
             let _ = process.child.wait();
         }
-        self.control.set_target_pid(None);
-        self.control.set_debugger_pid(None);
-    }
-}
-
-#[derive(Default)]
-struct LldbControl {
-    debugger_pid: Mutex<Option<u32>>,
-    target_pid: Mutex<Option<u32>>,
-}
-
-impl LldbControl {
-    fn set_debugger_pid(&self, pid: Option<u32>) {
-        if let Ok(mut slot) = self.debugger_pid.lock() {
-            *slot = pid;
-        }
-    }
-
-    fn set_target_pid(&self, pid: Option<u32>) {
-        if let Ok(mut slot) = self.target_pid.lock() {
-            *slot = pid;
-        }
-    }
-
-    fn debugger_pid(&self) -> Result<u32, BackendError> {
-        self.debugger_pid
-            .lock()
-            .map_err(|_| BackendError::Internal("lldb debugger pid lock poisoned".to_string()))?
-            .ok_or_else(|| BackendError::Unavailable("lldb debugger is not running".to_string()))
-    }
-
-    fn target_pid(&self) -> Result<u32, BackendError> {
-        self.target_pid
-            .lock()
-            .map_err(|_| BackendError::Internal("lldb target pid lock poisoned".to_string()))?
-            .ok_or_else(|| BackendError::ProcessNotRunning)
-    }
-
-    fn send_signal(&self, pid: u32, signal: Signal, description: &str) -> Result<(), BackendError> {
-        kill(Pid::from_raw(pid as i32), signal)
-            .map_err(|err| BackendError::Io(format!("failed to {description} pid {pid}: {err}")))
-    }
-}
-
-impl BackendControl for LldbControl {
-    fn interrupt(&self) -> Result<(), BackendError> {
-        let debugger_pid = self.debugger_pid()?;
-        self.send_signal(debugger_pid, Signal::SIGINT, "interrupt debugger")
-    }
-
-    fn terminate(&self) -> Result<(), BackendError> {
-        let target_pid = self.target_pid()?;
-        self.send_signal(target_pid, Signal::SIGKILL, "terminate target")
     }
 }
 

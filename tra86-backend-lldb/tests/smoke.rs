@@ -2,10 +2,9 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tra86_backend::{DebugBackend, LaunchRequest};
@@ -28,6 +27,13 @@ fn unique_fixture_dir() -> PathBuf {
     let mut dir = std::env::temp_dir();
     dir.push(format!("tra86-lldb-smoke-{}-{millis}", std::process::id()));
     dir
+}
+
+fn integration_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
 }
 
 fn build_fixture_binary_with_sleep(
@@ -121,6 +127,8 @@ fn spawn_ready_fixture(binary: &Path) -> Result<Child, Box<dyn std::error::Error
 
 #[test]
 fn lldb_backend_can_launch_and_inspect_real_fixture() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = integration_test_guard();
+
     if !tool_exists("lldb") || !Path::new("/usr/bin/cc").exists() {
         eprintln!("skipping LLDB smoke test because lldb or cc is unavailable");
         return Ok(());
@@ -187,80 +195,9 @@ fn lldb_backend_can_launch_and_inspect_real_fixture() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn lldb_interrupt_handle_can_pause_running_target() -> Result<(), Box<dyn std::error::Error>> {
-    if !tool_exists("lldb") || !Path::new("/usr/bin/cc").exists() {
-        eprintln!("skipping LLDB interrupt test because lldb or cc is unavailable");
-        return Ok(());
-    }
-
-    let binary = build_fixture_binary_with_sleep(10)?;
-    let binary_str = binary.to_string_lossy().into_owned();
-    let backend = Arc::new(Mutex::new(LldbBackend::new()));
-
-    {
-        let mut backend = backend.lock().expect("backend mutex should lock");
-        backend.open_target(&binary_str)?;
-        backend.launch(LaunchRequest {
-            target: TargetBinary {
-                program: binary_str.clone(),
-                args: Vec::new(),
-                cwd: None,
-                env: Vec::new(),
-            },
-        })?;
-    }
-
-    let control = backend
-        .lock()
-        .expect("backend mutex should lock")
-        .control_handle()
-        .expect("lldb backend should expose a control handle");
-
-    let continue_started = Instant::now();
-    let continue_thread = {
-        let backend = Arc::clone(&backend);
-        thread::spawn(move || -> Result<(), String> {
-            let mut backend = backend
-                .lock()
-                .map_err(|_| "backend mutex poisoned".to_string())?;
-            backend.continue_exec().map_err(|err| err.to_string())
-        })
-    };
-
-    thread::sleep(Duration::from_millis(500));
-    control.interrupt()?;
-
-    let continue_result = continue_thread
-        .join()
-        .expect("continue thread should not panic");
-    assert!(
-        continue_result.is_ok(),
-        "continue after interrupt should succeed: {:?}",
-        continue_result.err()
-    );
-    assert!(
-        continue_started.elapsed() < Duration::from_secs(6),
-        "interrupt should stop a blocking continue well before the fixture exits"
-    );
-
-    let mut backend = backend.lock().expect("backend mutex should lock");
-    let threads = backend.list_threads()?;
-    assert!(
-        !threads.is_empty(),
-        "expected debugger to remain attached after interrupt"
-    );
-    let thread_id = threads[0].id;
-    let registers = backend.read_registers(thread_id)?;
-    assert!(
-        !registers.registers.is_empty(),
-        "expected registers to remain readable after interrupt"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn lldb_backend_resolves_cpp_symbols_and_source() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = integration_test_guard();
+
     if !tool_exists("lldb") || !tool_exists("c++") {
         eprintln!("skipping LLDB C++ symbol test because lldb or c++ is unavailable");
         return Ok(());
@@ -297,7 +234,6 @@ int main() {
             env: Vec::new(),
         },
     })?;
-    backend.continue_exec()?;
 
     let threads = backend.list_threads()?;
     assert!(
@@ -335,6 +271,8 @@ int main() {
 #[test]
 fn lldb_backend_can_attach_to_live_cpp_process_and_list_threads(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = integration_test_guard();
+
     if !tool_exists("lldb") || !tool_exists("c++") {
         eprintln!("skipping LLDB attach test because lldb or c++ is unavailable");
         return Ok(());

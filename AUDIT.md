@@ -7,10 +7,9 @@ This repo is not a wreck, but it is absolutely overstated. It compiles, it opens
 ## Verified Current State
 
 - `cargo check`: passes after installing a Rust toolchain on this machine
-- `cargo test`: passes, but only because there are effectively no tests
-- `cargo run -p tra86-app`: failed before this audit because the package exposed two binaries and no `default-run`
-- `cargo run -p tra86-app --bin tra86-app`: launches the desktop app
-- `cargo run -p tra86-app --bin lldb_smoke -- /private/tmp/tra86-fixture/sample`: runs, returns disassembly, but only found a single register on arm64 during this audit
+- `cargo test`: passes with real LLDB integration coverage against compiled C and C++ fixtures, not just parser/unit tests
+- `cargo run -p tra86-app`: launches the desktop app
+- the LLDB path can launch, attach, inspect registers/memory/frames, resolve symbols/source, and step real native binaries
 
 ## What Is Real vs Aspirational
 
@@ -24,7 +23,6 @@ This repo is not a wreck, but it is absolutely overstated. It compiles, it opens
 
 ### Aspirational or overstated
 
-- “Meaningful tests”: false today
 - “Reliable tracing MVP”: false today
 - “Backend-agnostic architecture”: only partially true; the type split exists, but the real behavior is almost entirely LLDB-specific
 - “Trace analysis layer”: technically present, but currently a handful of mnemonic heuristics
@@ -42,7 +40,7 @@ This repo is not a wreck, but it is absolutely overstated. It compiles, it opens
 ## Correctness Risks
 
 - LLDB register reads are architecture-fragile. The current explicit register request is x86-heavy and behaved badly on arm64 during this audit.
-- Launch currently stops in loader/runtime code rather than proving a good user-facing stop point.
+- Mid-run pause/stop on the current LLDB CLI transport is still not reliable enough to present as done.
 - Backend snapshot collection silently converts many backend failures into empty vectors. That keeps the UI alive but hides real faults and desynchronization.
 - Trace deduplication is keyed only by instruction address, which can collapse repeated visits to the same IP into misleading history.
 - Argument parsing is `split_whitespace()`, which breaks quoting and escaped arguments.
@@ -59,7 +57,7 @@ This repo is not a wreck, but it is absolutely overstated. It compiles, it opens
 ## Concurrency and UI-Thread Risks
 
 - The dedicated worker thread is the right direction.
-- There is no formal session state machine, so process exit/detach/error paths can leave stale UI state behind.
+- Session lifecycle handling exists now, but it is still not a full state machine with generation tracking, so process exit/detach/error paths can still leave stale UI state behind.
 - Commands are serialized, but there is no cancellation or generation tracking. A slow backend reply can still arrive after the user has changed direction.
 - Error handling is inconsistent: command failures sometimes surface, data-fetch failures often disappear.
 
@@ -88,10 +86,10 @@ This repo is not a wreck, but it is absolutely overstated. It compiles, it opens
 ## Shortest Path To A Real MVP
 
 1. Stop lying in docs and packaging.
-2. Add real LLDB smoke/integration tests against a tiny native fixture binary.
+2. Move off the brittle LLDB CLI command transport for true async control, or explicitly scope the MVP around what the CLI path can do reliably.
 3. Fix LLDB register/disassembly/frame parsing on current target architectures.
 4. Stop swallowing backend refresh failures; surface them explicitly in UI state and logs.
-5. Add a minimal session lifecycle model so exit/detach/crash do not leave stale data onscreen.
+5. Tighten the session lifecycle model so exit/detach/crash do not leave stale data onscreen.
 6. Tighten trace/history handling so repeated stepping does not generate misleading state.
 7. Only after the backend is trustworthy, spend time on layout and UX refinement.
 

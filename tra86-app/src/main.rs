@@ -8,9 +8,7 @@ use chrono::Utc;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use tra86_analysis::{build_delta, compute_register_delta};
-use tra86_backend::{
-    BackendControlHandle, BackendOrchestrator, DebugBackend, LaunchRequest, MockBackend,
-};
+use tra86_backend::{BackendOrchestrator, DebugBackend, LaunchRequest, MockBackend};
 use tra86_backend_lldb::LldbBackend;
 use tra86_core::{
     Breakpoint, BreakpointLocation, DisassemblyLine, InstructionRecord, RegisterBank, StopReason,
@@ -587,8 +585,6 @@ struct BackendWorker {
 
 struct InFlightContinue {
     completion_rx: Receiver<(WorkerRuntime, anyhow::Result<BackendSnapshot>)>,
-    control: Option<BackendControlHandle>,
-    session: SessionStatus,
 }
 
 impl BackendWorker {
@@ -635,56 +631,17 @@ impl BackendWorker {
                     Err(RecvTimeoutError::Disconnected) => break,
                 };
 
-                if let Some(active) = in_flight.as_mut() {
-                    let result = match command {
-                        BackendCommand::Pause => active
-                            .control
-                            .as_ref()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "current backend cannot pause a running target asynchronously"
-                                )
-                            })
-                            .and_then(|control| control.interrupt().map_err(anyhow::Error::from))
-                            .map(|_| SessionUpdate {
-                                status_line: "backend interrupt requested".to_string(),
-                                session: SessionStatus {
-                                    detail: "Pause requested".to_string(),
-                                    ..active.session.clone()
-                                },
-                                output_lines: Vec::new(),
-                            }),
-                        BackendCommand::Stop => active
-                            .control
-                            .as_ref()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "current backend cannot stop a running target asynchronously"
-                                )
-                            })
-                            .and_then(|control| control.terminate().map_err(anyhow::Error::from))
-                            .map(|_| SessionUpdate {
-                                status_line: "backend termination requested".to_string(),
-                                session: SessionStatus {
-                                    detail: "Stop requested".to_string(),
-                                    ..active.session.clone()
-                                },
-                                output_lines: Vec::new(),
-                            }),
-                        _ => Err(anyhow::anyhow!(
-                            "command is unavailable while the target is running"
-                        )),
-                    };
-
-                    match result {
-                        Ok(update) => {
-                            active.session = update.session.clone();
-                            let _ = event_tx.send(WorkerMessage::SessionUpdate(update));
+                if in_flight.is_some() {
+                    let _ = event_tx.send(WorkerMessage::Error(match command {
+                        BackendCommand::Pause => {
+                            "pause is not reliable on the current LLDB CLI transport".to_string()
                         }
-                        Err(err) => {
-                            let _ = event_tx.send(WorkerMessage::Error(err.to_string()));
+                        BackendCommand::Stop => {
+                            "stop while running is not reliable on the current LLDB CLI transport"
+                                .to_string()
                         }
-                    }
+                        _ => "command is unavailable while the target is running".to_string(),
+                    }));
                     continue;
                 }
 
@@ -697,19 +654,13 @@ impl BackendWorker {
 
                 if matches!(command, BackendCommand::Continue) {
                     let update = ready_runtime.begin_running("Running target");
-                    let control = ready_runtime.control_handle();
-                    let session = update.session.clone();
                     let (completion_tx, completion_rx) = mpsc::channel();
                     thread::spawn(move || {
                         let result = ready_runtime.handle_command(BackendCommand::Continue);
                         let _ = completion_tx.send((ready_runtime, result));
                     });
                     let _ = event_tx.send(WorkerMessage::SessionUpdate(update));
-                    in_flight = Some(InFlightContinue {
-                        completion_rx,
-                        control,
-                        session,
-                    });
+                    in_flight = Some(InFlightContinue { completion_rx });
                     continue;
                 }
 
@@ -999,10 +950,6 @@ impl WorkerRuntime {
         }
 
         self.collect_snapshot()
-    }
-
-    fn control_handle(&self) -> Option<BackendControlHandle> {
-        self.orchestrator.backend().control_handle()
     }
 
     fn begin_running(&mut self, detail: impl Into<String>) -> SessionUpdate {

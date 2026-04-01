@@ -9,14 +9,15 @@ As of 2026-03-31, this repo compiles, the app launches, and the LLDB path can dr
 What is verified right now:
 
 - `cargo check` passes
-- `cargo test` passes with analysis tests, LLDB parser tests, and a real LLDB smoke test against a compiled native fixture
+- `cargo test` passes with analysis tests, LLDB parser tests, and real LLDB integration tests against compiled C and C++ fixtures
 - `cargo run -p tra86-app` launches the desktop app
-- the LLDB smoke binary can launch, inspect, read memory from, and step through a real fixture program
+- the LLDB path can launch, attach, inspect memory/registers/frames, resolve symbols/source, and step real native fixtures
 
 What is not yet true:
 
 - this is not a production-ready tracer/debugger
 - the backend is not yet robust across common failure cases
+- mid-run pause/stop is still not reliable enough on the current LLDB CLI transport, so the UI does not pretend that it is
 - the analysis layer is still thin
 - the architecture still contains a few abstractions that overpromise capability
 
@@ -40,7 +41,7 @@ What is not yet true:
 ## Biggest Current Problems
 
 - the LLDB adapter is text-protocol brittle
-- there is still no explicit session state machine
+- the session model is better than it was, but it is still not a full state machine with generation tracking
 - some backend failure paths are now surfaced in the UI, but lifecycle recovery is still incomplete
 - test coverage is now real but still thin compared to the size of the product goal
 - some abstractions are more decorative than proven
@@ -78,4 +79,4 @@ The intended product is still the same:
 - real tracing/debugging on native binaries
 - strong debugger fidelity before UI polish
 
-The next work should focus on backend reliability, integration tests, typed failure handling, and a session model that does not drift out of sync when the target process does something inconvenient.
+The next work should focus on backend reliability, a better transport for true async pause/resume behavior, typed failure handling, and a session model that does not drift out of sync when the target process does something inconvenient.
