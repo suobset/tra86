@@ -21,6 +21,74 @@ pub enum BottomTab {
     Output,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPhase {
+    Idle,
+    TargetLoaded,
+    Stopped,
+    Exited,
+    Detached,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionStatus {
+    pub phase: SessionPhase,
+    pub detail: String,
+    pub is_busy: bool,
+    pub has_target: bool,
+    pub has_live_process: bool,
+    pub can_restart: bool,
+    pub last_error: Option<String>,
+}
+
+impl Default for SessionStatus {
+    fn default() -> Self {
+        Self {
+            phase: SessionPhase::Idle,
+            detail: "Idle".to_string(),
+            is_busy: false,
+            has_target: false,
+            has_live_process: false,
+            can_restart: false,
+            last_error: None,
+        }
+    }
+}
+
+impl SessionStatus {
+    pub fn can_attach(&self) -> bool {
+        !self.is_busy && !self.has_live_process
+    }
+
+    pub fn can_continue(&self) -> bool {
+        !self.is_busy && self.has_live_process
+    }
+
+    pub fn can_pause(&self) -> bool {
+        !self.is_busy && self.has_live_process
+    }
+
+    pub fn can_step(&self) -> bool {
+        !self.is_busy && self.has_live_process
+    }
+
+    pub fn can_stop(&self) -> bool {
+        !self.is_busy && self.has_live_process
+    }
+
+    pub fn can_refresh(&self) -> bool {
+        !self.is_busy && self.has_target
+    }
+
+    pub fn can_toggle_breakpoint(&self) -> bool {
+        !self.is_busy && self.has_target
+    }
+
+    pub fn can_jump_memory(&self) -> bool {
+        !self.is_busy && self.has_live_process
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     SetBackend(BackendChoice),
@@ -54,6 +122,7 @@ pub struct UiModel {
     pub launch_args: String,
     pub attach_pid: String,
     pub status_line: String,
+    pub session: SessionStatus,
     pub stop_reason: StopReason,
     pub threads: Vec<ThreadState>,
     pub frames: Vec<FrameState>,
@@ -79,6 +148,7 @@ impl Default for UiModel {
             launch_args: String::new(),
             attach_pid: String::new(),
             status_line: "Idle".to_string(),
+            session: SessionStatus::default(),
             stop_reason: StopReason::None,
             threads: Vec::new(),
             frames: Vec::new(),
@@ -101,7 +171,7 @@ impl Default for UiModel {
 pub fn render(ctx: &egui::Context, model: &mut UiModel) -> Vec<UiEvent> {
     let mut events = Vec::new();
 
-    handle_shortcuts(ctx, &mut events);
+    handle_shortcuts(ctx, model, &mut events);
     top_bar(ctx, model, &mut events);
     left_session_panel(ctx, model, &mut events);
     right_registers_panel(ctx, model, &mut events);
@@ -111,24 +181,28 @@ pub fn render(ctx: &egui::Context, model: &mut UiModel) -> Vec<UiEvent> {
     events
 }
 
-fn handle_shortcuts(ctx: &egui::Context, events: &mut Vec<UiEvent>) {
+fn handle_shortcuts(ctx: &egui::Context, model: &UiModel, events: &mut Vec<UiEvent>) {
     ctx.input(|input| {
         if input.key_pressed(Key::F5) {
-            events.push(UiEvent::Continue);
+            if model.session.can_continue() {
+                events.push(UiEvent::Continue);
+            } else if can_launch(model) {
+                events.push(UiEvent::Launch);
+            }
         }
-        if input.key_pressed(Key::F10) {
+        if input.key_pressed(Key::F10) && model.session.can_step() {
             events.push(UiEvent::StepOver);
         }
-        if input.key_pressed(Key::F11) {
+        if input.key_pressed(Key::F11) && model.session.can_step() {
             events.push(UiEvent::StepInto);
         }
-        if input.modifiers.shift && input.key_pressed(Key::F11) {
+        if input.modifiers.shift && input.key_pressed(Key::F11) && model.session.can_step() {
             events.push(UiEvent::StepOut);
         }
-        if input.key_pressed(Key::F6) {
+        if input.key_pressed(Key::F6) && model.session.can_pause() {
             events.push(UiEvent::Pause);
         }
-        if input.modifiers.command && input.key_pressed(Key::R) {
+        if input.modifiers.command && input.key_pressed(Key::R) && model.session.can_restart {
             events.push(UiEvent::Restart);
         }
     });
@@ -142,11 +216,17 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
                     events.push(UiEvent::OpenExecutablePicker);
                     ui.close_menu();
                 }
-                if ui.button("Refresh").clicked() {
+                if ui
+                    .add_enabled(model.session.can_refresh(), egui::Button::new("Refresh"))
+                    .clicked()
+                {
                     events.push(UiEvent::Refresh);
                     ui.close_menu();
                 }
-                if ui.button("Launch").clicked() {
+                if ui
+                    .add_enabled(can_launch(model), egui::Button::new("Launch"))
+                    .clicked()
+                {
                     events.push(UiEvent::Launch);
                     ui.close_menu();
                 }
@@ -168,31 +248,64 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
             });
 
             ui.menu_button("Debug", |ui| {
-                if ui.button("Launch").clicked() {
+                if ui
+                    .add_enabled(can_launch(model), egui::Button::new("Launch"))
+                    .clicked()
+                {
                     events.push(UiEvent::Launch);
                     ui.close_menu();
                 }
-                if ui.button("Continue (F5)").clicked() {
+                if ui
+                    .add_enabled(
+                        model.session.can_continue(),
+                        egui::Button::new("Continue (F5)"),
+                    )
+                    .clicked()
+                {
                     events.push(UiEvent::Continue);
                     ui.close_menu();
                 }
-                if ui.button("Pause (F6)").clicked() {
+                if ui
+                    .add_enabled(model.session.can_pause(), egui::Button::new("Pause (F6)"))
+                    .clicked()
+                {
                     events.push(UiEvent::Pause);
                     ui.close_menu();
                 }
-                if ui.button("Step Into (F11)").clicked() {
+                if ui
+                    .add_enabled(
+                        model.session.can_step(),
+                        egui::Button::new("Step Into (F11)"),
+                    )
+                    .clicked()
+                {
                     events.push(UiEvent::StepInto);
                     ui.close_menu();
                 }
-                if ui.button("Step Over (F10)").clicked() {
+                if ui
+                    .add_enabled(
+                        model.session.can_step(),
+                        egui::Button::new("Step Over (F10)"),
+                    )
+                    .clicked()
+                {
                     events.push(UiEvent::StepOver);
                     ui.close_menu();
                 }
-                if ui.button("Step Out (Shift+F11)").clicked() {
+                if ui
+                    .add_enabled(
+                        model.session.can_step(),
+                        egui::Button::new("Step Out (Shift+F11)"),
+                    )
+                    .clicked()
+                {
                     events.push(UiEvent::StepOut);
                     ui.close_menu();
                 }
-                if ui.button("Stop").clicked() {
+                if ui
+                    .add_enabled(model.session.can_stop(), egui::Button::new("Stop"))
+                    .clicked()
+                {
                     events.push(UiEvent::Stop);
                     ui.close_menu();
                 }
@@ -226,14 +339,23 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
             });
 
             ui.menu_button("Navigate", |ui| {
-                if ui.button("Jump To Current Instruction").clicked() {
+                if ui
+                    .add_enabled(
+                        model.session.can_jump_memory(),
+                        egui::Button::new("Jump To Current Instruction"),
+                    )
+                    .clicked()
+                {
                     events.push(UiEvent::JumpToCurrentInstruction);
                     ui.close_menu();
                 }
             });
 
             ui.menu_button("Analysis", |ui| {
-                if ui.button("Refresh State").clicked() {
+                if ui
+                    .add_enabled(model.session.can_refresh(), egui::Button::new("Refresh State"))
+                    .clicked()
+                {
                     events.push(UiEvent::Refresh);
                     ui.close_menu();
                 }
@@ -270,63 +392,140 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
             ui.separator();
 
             ui.label("Executable:");
-            ui.add(TextEdit::singleline(&mut model.executable_path).desired_width(280.0));
-            if ui.button("Browse").clicked() {
+            ui.add_enabled(
+                !model.session.is_busy,
+                TextEdit::singleline(&mut model.executable_path).desired_width(280.0),
+            );
+            if ui
+                .add_enabled(!model.session.is_busy, egui::Button::new("Browse"))
+                .clicked()
+            {
                 events.push(UiEvent::OpenExecutablePicker);
             }
 
             ui.label("Args:");
-            ui.add(TextEdit::singleline(&mut model.launch_args).desired_width(200.0));
-            if ui.button("Launch").clicked() {
+            ui.add_enabled(
+                !model.session.is_busy,
+                TextEdit::singleline(&mut model.launch_args).desired_width(200.0),
+            );
+            if ui
+                .add_enabled(can_launch(model), egui::Button::new("Launch"))
+                .clicked()
+            {
                 events.push(UiEvent::Launch);
             }
 
             ui.separator();
             ui.label("Attach PID:");
-            ui.add(TextEdit::singleline(&mut model.attach_pid).desired_width(80.0));
-            if ui.button("Attach").clicked() {
+            ui.add_enabled(
+                model.session.can_attach(),
+                TextEdit::singleline(&mut model.attach_pid).desired_width(80.0),
+            );
+            if ui
+                .add_enabled(model.session.can_attach(), egui::Button::new("Attach"))
+                .clicked()
+            {
                 events.push(UiEvent::Attach);
             }
 
             ui.separator();
-            control_buttons(ui, events);
-            if ui.button("Refresh").clicked() {
+            control_buttons(ui, model, events);
+            if ui
+                .add_enabled(model.session.can_refresh(), egui::Button::new("Refresh"))
+                .clicked()
+            {
                 events.push(UiEvent::Refresh);
             }
         });
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new(format!("State: {}", model.status_line)).color(Color32::LIGHT_GREEN),
+                RichText::new(format!("State: {}", model.session.detail))
+                    .color(session_color(model.session.phase, model.session.is_busy)),
             );
             ui.separator();
+            ui.label(format!("Backend: {:?}", model.backend_choice));
+            ui.separator();
             ui.label(format!("Stop reason: {:?}", model.stop_reason));
+            if !model.executable_path.trim().is_empty() {
+                ui.separator();
+                ui.label(format!("Target: {}", model.executable_path.trim()));
+            }
             ui.separator();
             ui.label("F5 continue | F10 step over | F11 step into | Shift+F11 step out | F6 pause");
         });
+
+        if let Some(error) = &model.session.last_error {
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Last error:").strong().color(Color32::LIGHT_RED));
+                ui.label(RichText::new(error).color(Color32::LIGHT_RED));
+            });
+        }
     });
 }
 
-fn control_buttons(ui: &mut egui::Ui, events: &mut Vec<UiEvent>) {
-    if ui.button("Run/Continue").clicked() {
-        events.push(UiEvent::Continue);
+fn control_buttons(ui: &mut egui::Ui, model: &UiModel, events: &mut Vec<UiEvent>) {
+    let primary_label = if model.session.is_busy {
+        "Working..."
+    } else if model.session.can_continue() {
+        "Continue"
+    } else {
+        "Launch"
+    };
+    let primary_enabled = if model.session.can_continue() {
+        model.session.can_continue()
+    } else {
+        can_launch(model)
+    };
+
+    if ui
+        .add_enabled(primary_enabled, egui::Button::new(primary_label))
+        .clicked()
+    {
+        if model.session.can_continue() {
+            events.push(UiEvent::Continue);
+        } else {
+            events.push(UiEvent::Launch);
+        }
     }
-    if ui.button("Pause").clicked() {
+    if ui
+        .add_enabled(model.session.can_pause(), egui::Button::new("Pause"))
+        .clicked()
+    {
         events.push(UiEvent::Pause);
     }
-    if ui.button("Step Into").clicked() {
+    if ui
+        .add_enabled(model.session.can_step(), egui::Button::new("Step Into"))
+        .clicked()
+    {
         events.push(UiEvent::StepInto);
     }
-    if ui.button("Step Over").clicked() {
+    if ui
+        .add_enabled(model.session.can_step(), egui::Button::new("Step Over"))
+        .clicked()
+    {
         events.push(UiEvent::StepOver);
     }
-    if ui.button("Step Out").clicked() {
+    if ui
+        .add_enabled(model.session.can_step(), egui::Button::new("Step Out"))
+        .clicked()
+    {
         events.push(UiEvent::StepOut);
     }
-    if ui.button("Restart").clicked() {
+    if ui
+        .add_enabled(
+            !model.session.is_busy && model.session.can_restart,
+            egui::Button::new("Restart"),
+        )
+        .clicked()
+    {
         events.push(UiEvent::Restart);
     }
-    if ui.button("Stop").clicked() {
+    if ui
+        .add_enabled(model.session.can_stop(), egui::Button::new("Stop"))
+        .clicked()
+    {
         events.push(UiEvent::Stop);
     }
 }
@@ -477,7 +676,13 @@ fn center_disassembly(ctx: &egui::Context, model: &UiModel, events: &mut Vec<UiE
                 for line in &model.disassembly {
                     ui.horizontal(|ui| {
                         let bp_marker = if line.has_breakpoint { "●" } else { "○" };
-                        if ui.button(bp_marker).clicked() {
+                        if ui
+                            .add_enabled(
+                                model.session.can_toggle_breakpoint(),
+                                egui::Button::new(bp_marker),
+                            )
+                            .clicked()
+                        {
                             events.push(UiEvent::ToggleBreakpoint(line.address));
                         }
 
@@ -502,7 +707,10 @@ fn center_disassembly(ctx: &egui::Context, model: &UiModel, events: &mut Vec<UiE
 
                         if let Some(target) = line.branch_target {
                             if ui
-                                .small_button(format!("-> 0x{target:x}"))
+                                .add_enabled(
+                                    model.session.can_jump_memory(),
+                                    egui::Button::new(format!("-> 0x{target:x}")),
+                                )
                                 .on_hover_text("Jump to target in memory view")
                                 .clicked()
                             {
@@ -617,8 +825,14 @@ fn render_stack(ui: &mut egui::Ui, model: &UiModel, events: &mut Vec<UiEvent>) {
 fn render_memory(ui: &mut egui::Ui, model: &mut UiModel, events: &mut Vec<UiEvent>) {
     ui.horizontal(|ui| {
         ui.label("Address:");
-        ui.add(TextEdit::singleline(&mut model.memory_base_input).desired_width(140.0));
-        if ui.button("Jump").clicked() {
+        ui.add_enabled(
+            model.session.can_jump_memory(),
+            TextEdit::singleline(&mut model.memory_base_input).desired_width(140.0),
+        );
+        if ui
+            .add_enabled(model.session.can_jump_memory(), egui::Button::new("Jump"))
+            .clicked()
+        {
             if let Some(addr) = parse_address(&model.memory_base_input) {
                 events.push(UiEvent::JumpMemory(addr));
             }
@@ -753,10 +967,31 @@ fn render_output(ui: &mut egui::Ui, model: &UiModel) {
     ScrollArea::vertical()
         .id_salt("output_scroll")
         .show(ui, |ui| {
+            if model.output_lines.is_empty() {
+                ui.label("No backend messages yet.");
+            }
             for line in &model.output_lines {
                 ui.label(RichText::new(line).monospace().color(Color32::LIGHT_GRAY));
             }
         });
+}
+
+fn can_launch(model: &UiModel) -> bool {
+    !model.session.is_busy && !model.executable_path.trim().is_empty()
+}
+
+fn session_color(phase: SessionPhase, is_busy: bool) -> Color32 {
+    if is_busy {
+        return Color32::YELLOW;
+    }
+
+    match phase {
+        SessionPhase::Idle => Color32::GRAY,
+        SessionPhase::TargetLoaded => Color32::LIGHT_BLUE,
+        SessionPhase::Stopped => Color32::LIGHT_GREEN,
+        SessionPhase::Exited => Color32::LIGHT_RED,
+        SessionPhase::Detached => Color32::KHAKI,
+    }
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {

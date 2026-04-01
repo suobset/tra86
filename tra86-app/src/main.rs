@@ -14,7 +14,7 @@ use tra86_core::{
     Breakpoint, BreakpointLocation, DisassemblyLine, InstructionRecord, RegisterBank, StopReason,
     SymbolInfo, TargetBinary, TraceEvent,
 };
-use tra86_ui::{BackendChoice, UiEvent, UiModel};
+use tra86_ui::{BackendChoice, SessionPhase, SessionStatus, UiEvent, UiModel};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -91,20 +91,53 @@ impl eframe::App for Tra86App {
 }
 
 impl Tra86App {
+    fn reset_trace_for_new_session(&mut self) {
+        self.previous_registers = None;
+        self.previous_sp = None;
+        self.last_traced_ip = None;
+        self.trace.clear();
+        self.ui.trace.clear();
+        self.ui.register_diffs.clear();
+    }
+
+    fn clear_live_views(&mut self) {
+        self.ui.threads.clear();
+        self.ui.frames.clear();
+        self.ui.registers = None;
+        self.ui.register_diffs.clear();
+        self.ui.memory_map_lines.clear();
+        self.ui.memory_bytes.clear();
+    }
+
+    fn queue_backend_command(&mut self, command: BackendCommand, pending_detail: impl Into<String>) {
+        self.ui.session.is_busy = true;
+        self.ui.session.last_error = None;
+        self.ui.status_line = pending_detail.into();
+        self.worker.send(command);
+    }
+
+    fn push_ui_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.ui.session.last_error = Some(message.clone());
+        self.ui.output_lines.push(format!("error: {message}"));
+    }
+
     fn handle_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::SetBackend(choice) => {
                 self.ui.backend_choice = choice;
-                self.worker.send(BackendCommand::SwitchBackend(choice));
+                self.reset_trace_for_new_session();
+                self.clear_live_views();
+                self.queue_backend_command(
+                    BackendCommand::SwitchBackend(choice),
+                    format!("Switching backend to {choice:?}"),
+                );
                 if !self.ui.executable_path.trim().is_empty() {
-                    self.worker
-                        .send(BackendCommand::OpenTarget(self.ui.executable_path.clone()));
+                    self.queue_backend_command(
+                        BackendCommand::OpenTarget(self.ui.executable_path.clone()),
+                        "Loading target into new backend",
+                    );
                 }
-                self.trace.clear();
-                self.ui.trace.clear();
-                self.ui.frames.clear();
-                self.last_traced_ip = None;
-                self.ui.status_line = format!("Switched backend to {choice:?}");
             }
             UiEvent::OpenExecutablePicker => {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
@@ -112,26 +145,26 @@ impl Tra86App {
                     self.ui
                         .output_lines
                         .push(format!("Configured target: {}", self.ui.executable_path));
-                    self.worker
-                        .send(BackendCommand::OpenTarget(self.ui.executable_path.clone()));
+                    self.reset_trace_for_new_session();
+                    self.clear_live_views();
+                    self.queue_backend_command(
+                        BackendCommand::OpenTarget(self.ui.executable_path.clone()),
+                        "Loading target",
+                    );
                 }
             }
             UiEvent::Launch => {
-                if self.ui.executable_path.trim().is_empty() {
-                    self.ui
-                        .output_lines
-                        .push("Set an executable path before launch".to_string());
+                if self.ui.session.is_busy {
+                    self.push_ui_error("Launch is not available while another backend operation is running");
                     return;
                 }
-                if self.ui.backend_choice == BackendChoice::Mock
-                    && !self.ui.executable_path.trim().is_empty()
-                {
-                    self.ui.backend_choice = BackendChoice::Lldb;
-                    self.worker
-                        .send(BackendCommand::SwitchBackend(BackendChoice::Lldb));
-                    self.ui
-                        .output_lines
-                        .push("Auto-switched backend to LLDB for executable launch".to_string());
+                if self.ui.executable_path.trim().is_empty() {
+                    self.push_ui_error("Set an executable path before launch");
+                    return;
+                }
+                if !Path::new(self.ui.executable_path.trim()).exists() {
+                    self.push_ui_error("Executable path does not exist");
+                    return;
                 }
 
                 let target = TargetBinary {
@@ -141,56 +174,144 @@ impl Tra86App {
                     env: Vec::new(),
                 };
                 self.remember_session(&target);
-                self.worker
-                    .send(BackendCommand::OpenTarget(target.program.clone()));
-                self.worker.send(BackendCommand::Launch(target));
+                self.reset_trace_for_new_session();
+                self.clear_live_views();
+                self.queue_backend_command(BackendCommand::Launch(target), "Launching target");
             }
             UiEvent::Attach => {
+                if !self.ui.session.can_attach() {
+                    self.push_ui_error("Attach is not available in the current session state");
+                    return;
+                }
                 if let Ok(pid) = self.ui.attach_pid.trim().parse::<u32>() {
-                    self.worker.send(BackendCommand::Attach(pid));
+                    self.reset_trace_for_new_session();
+                    self.clear_live_views();
+                    self.queue_backend_command(BackendCommand::Attach(pid), format!("Attaching to pid {pid}"));
                 } else {
-                    self.ui
-                        .output_lines
-                        .push("Attach PID is invalid".to_string());
+                    self.push_ui_error("Attach PID is invalid");
                 }
             }
-            UiEvent::Continue => self.worker.send(BackendCommand::Continue),
-            UiEvent::Pause => self.worker.send(BackendCommand::Pause),
-            UiEvent::StepInto => self.worker.send(BackendCommand::StepInto),
-            UiEvent::StepOver => self.worker.send(BackendCommand::StepOver),
-            UiEvent::StepOut => self.worker.send(BackendCommand::StepOut),
+            UiEvent::Continue => {
+                if !self.ui.session.can_continue() {
+                    self.push_ui_error("Continue is not available in the current session state");
+                    return;
+                }
+                self.queue_backend_command(BackendCommand::Continue, "Continuing execution");
+            }
+            UiEvent::Pause => {
+                if !self.ui.session.can_pause() {
+                    self.push_ui_error("Pause is not available in the current session state");
+                    return;
+                }
+                self.queue_backend_command(BackendCommand::Pause, "Pausing execution");
+            }
+            UiEvent::StepInto => {
+                if !self.ui.session.can_step() {
+                    self.push_ui_error("Step into is not available in the current session state");
+                    return;
+                }
+                self.queue_backend_command(BackendCommand::StepInto, "Stepping into instruction");
+            }
+            UiEvent::StepOver => {
+                if !self.ui.session.can_step() {
+                    self.push_ui_error("Step over is not available in the current session state");
+                    return;
+                }
+                self.queue_backend_command(BackendCommand::StepOver, "Stepping over instruction");
+            }
+            UiEvent::StepOut => {
+                if !self.ui.session.can_step() {
+                    self.push_ui_error("Step out is not available in the current session state");
+                    return;
+                }
+                self.queue_backend_command(BackendCommand::StepOut, "Stepping out of frame");
+            }
             UiEvent::Restart => {
+                if self.ui.session.is_busy || !self.ui.session.can_restart {
+                    self.push_ui_error("Restart is not available in the current session state");
+                    return;
+                }
+                if self.ui.executable_path.trim().is_empty() || !Path::new(self.ui.executable_path.trim()).exists() {
+                    self.push_ui_error("Set a valid executable path before restart");
+                    return;
+                }
                 let target = TargetBinary {
                     program: self.ui.executable_path.trim().to_string(),
                     args: split_args(&self.ui.launch_args),
                     cwd: None,
                     env: Vec::new(),
                 };
-                self.worker.send(BackendCommand::Restart(target));
+                self.reset_trace_for_new_session();
+                self.clear_live_views();
+                self.queue_backend_command(BackendCommand::Restart(target), "Restarting target");
             }
-            UiEvent::Stop => self.worker.send(BackendCommand::Stop),
-            UiEvent::Refresh => self.worker.send(BackendCommand::Refresh),
+            UiEvent::Stop => {
+                if !self.ui.session.can_stop() {
+                    self.push_ui_error("Stop is not available in the current session state");
+                    return;
+                }
+                self.queue_backend_command(BackendCommand::Stop, "Stopping target");
+            }
+            UiEvent::Refresh => {
+                if !self.ui.session.can_refresh() {
+                    self.push_ui_error("Refresh is not available until a target is loaded");
+                    return;
+                }
+                self.queue_backend_command(BackendCommand::Refresh, "Refreshing state");
+            }
             UiEvent::ToggleBreakpoint(addr) => {
-                self.worker.send(BackendCommand::ToggleBreakpoint(addr))
+                if !self.ui.session.can_toggle_breakpoint() {
+                    self.push_ui_error("Breakpoints are not available until a target is loaded");
+                    return;
+                }
+                self.queue_backend_command(
+                    BackendCommand::ToggleBreakpoint(addr),
+                    format!("Toggling breakpoint at 0x{addr:x}"),
+                );
             }
-            UiEvent::RemoveBreakpoint(id) => self.worker.send(BackendCommand::RemoveBreakpoint(id)),
+            UiEvent::RemoveBreakpoint(id) => {
+                if !self.ui.session.can_toggle_breakpoint() {
+                    self.push_ui_error("Breakpoints are not available until a target is loaded");
+                    return;
+                }
+                self.queue_backend_command(
+                    BackendCommand::RemoveBreakpoint(id),
+                    format!("Removing breakpoint #{id}"),
+                );
+            }
             UiEvent::JumpMemory(addr) => {
+                if !self.ui.session.can_jump_memory() {
+                    self.push_ui_error("Memory inspection requires a live stopped process");
+                    return;
+                }
                 self.ui.memory_base_input = format!("0x{addr:x}");
-                self.worker.send(BackendCommand::JumpMemory(addr));
+                self.queue_backend_command(
+                    BackendCommand::JumpMemory(addr),
+                    format!("Loading memory around 0x{addr:x}"),
+                );
             }
             UiEvent::JumpDisassembly(addr) => {
-                self.worker.send(BackendCommand::JumpDisassembly(addr));
+                if !self.ui.session.can_refresh() {
+                    self.push_ui_error("Disassembly navigation requires a loaded target");
+                    return;
+                }
+                self.queue_backend_command(
+                    BackendCommand::JumpDisassembly(addr),
+                    format!("Jumping disassembly to 0x{addr:x}"),
+                );
             }
             UiEvent::ClearOutput => self.ui.output_lines.clear(),
             UiEvent::ClearTrace => {
-                self.trace.clear();
-                self.ui.trace.clear();
+                self.reset_trace_for_new_session();
             }
             UiEvent::SetBottomTab(tab) => self.ui.bottom_tab = tab,
             UiEvent::JumpToCurrentInstruction => {
                 if let Some(line) = self.ui.disassembly.iter().find(|line| line.is_current) {
                     self.ui.memory_base_input = format!("0x{:x}", line.address);
-                    self.worker.send(BackendCommand::JumpMemory(line.address));
+                    self.queue_backend_command(
+                        BackendCommand::JumpMemory(line.address),
+                        format!("Loading memory around 0x{:x}", line.address),
+                    );
                 }
             }
             UiEvent::ShowAbout => self.ui.output_lines.push(
@@ -204,6 +325,8 @@ impl Tra86App {
         match message {
             WorkerMessage::Snapshot(snapshot) => {
                 self.ui.status_line = snapshot.status_line;
+                self.ui.session = snapshot.session;
+                self.ui.session.is_busy = false;
                 self.ui.stop_reason = snapshot.stop_reason;
                 self.ui.threads = snapshot.threads;
                 self.ui.frames = snapshot.frames;
@@ -214,6 +337,12 @@ impl Tra86App {
                 self.ui.memory_bytes = snapshot.memory_bytes;
                 self.ui.output_lines.extend(snapshot.output_lines);
                 self.ui.analysis_lines = build_analysis_lines(&self.ui.disassembly, &self.trace);
+                if !self.ui.session.has_live_process {
+                    self.ui.registers = None;
+                    self.ui.register_diffs.clear();
+                    self.previous_registers = None;
+                    self.previous_sp = None;
+                }
                 let current_line = self
                     .ui
                     .disassembly
@@ -303,6 +432,8 @@ impl Tra86App {
                 }
             }
             WorkerMessage::Error(error) => {
+                self.ui.session.is_busy = false;
+                self.ui.session.last_error = Some(error.clone());
                 self.ui.output_lines.push(format!("error: {error}"));
             }
         }
@@ -508,6 +639,7 @@ enum WorkerMessage {
 #[derive(Debug)]
 struct BackendSnapshot {
     status_line: String,
+    session: SessionStatus,
     stop_reason: StopReason,
     threads: Vec<tra86_core::ThreadState>,
     frames: Vec<tra86_core::FrameState>,
@@ -520,9 +652,151 @@ struct BackendSnapshot {
     output_lines: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePhase {
+    Idle,
+    TargetLoaded,
+    Stopped,
+    Exited,
+    Detached,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeSession {
+    phase: RuntimePhase,
+    target_program: Option<String>,
+    attached_pid: Option<u32>,
+    has_live_process: bool,
+    last_error: Option<String>,
+}
+
+impl Default for RuntimeSession {
+    fn default() -> Self {
+        Self {
+            phase: RuntimePhase::Idle,
+            target_program: None,
+            attached_pid: None,
+            has_live_process: false,
+            last_error: None,
+        }
+    }
+}
+
+impl RuntimeSession {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn has_target(&self) -> bool {
+        self.target_program.is_some() || self.attached_pid.is_some()
+    }
+
+    fn can_restart(&self) -> bool {
+        self.target_program.is_some()
+    }
+
+    fn set_target_program(&mut self, program: String) {
+        self.target_program = Some(program);
+        self.attached_pid = None;
+        self.has_live_process = false;
+        self.phase = RuntimePhase::TargetLoaded;
+        self.last_error = None;
+    }
+
+    fn set_attached_pid(&mut self, pid: u32) {
+        self.attached_pid = Some(pid);
+        self.target_program = None;
+        self.has_live_process = true;
+        self.phase = RuntimePhase::Stopped;
+        self.last_error = None;
+    }
+
+    fn mark_process_stopped(&mut self) {
+        self.has_live_process = true;
+        self.phase = RuntimePhase::Stopped;
+        self.last_error = None;
+    }
+
+    fn mark_exited(&mut self) {
+        self.has_live_process = false;
+        self.attached_pid = None;
+        self.phase = RuntimePhase::Exited;
+    }
+
+    fn mark_detached(&mut self) {
+        self.has_live_process = false;
+        self.attached_pid = None;
+        self.phase = RuntimePhase::Detached;
+    }
+
+    fn note_error(&mut self, error: impl Into<String>) {
+        self.last_error = Some(error.into());
+    }
+
+    fn reconcile_from_snapshot(&mut self, stop_reason: &StopReason, has_live_process: bool) {
+        match stop_reason {
+            StopReason::Exited(_) => self.mark_exited(),
+            StopReason::Detached => self.mark_detached(),
+            _ if has_live_process => self.mark_process_stopped(),
+            _ if self.has_target() => {
+                self.has_live_process = false;
+                if matches!(self.phase, RuntimePhase::Stopped) {
+                    self.phase = RuntimePhase::TargetLoaded;
+                }
+            }
+            _ => self.phase = RuntimePhase::Idle,
+        }
+    }
+
+    fn to_ui_status(&self, is_busy: bool) -> SessionStatus {
+        let detail = if is_busy {
+            self.last_error
+                .clone()
+                .unwrap_or_else(|| "Working...".to_string())
+        } else {
+            match self.phase {
+                RuntimePhase::Idle => "No target loaded".to_string(),
+                RuntimePhase::TargetLoaded => self
+                    .target_program
+                    .as_ref()
+                    .map(|program| format!("Target loaded: {program}"))
+                    .unwrap_or_else(|| "Target loaded".to_string()),
+                RuntimePhase::Stopped => {
+                    if let Some(pid) = self.attached_pid {
+                        format!("Attached to pid {pid} and stopped")
+                    } else if let Some(program) = &self.target_program {
+                        format!("Stopped in {program}")
+                    } else {
+                        "Stopped".to_string()
+                    }
+                }
+                RuntimePhase::Exited => "Process exited".to_string(),
+                RuntimePhase::Detached => "Detached from process".to_string(),
+            }
+        };
+
+        SessionStatus {
+            phase: match self.phase {
+                RuntimePhase::Idle => SessionPhase::Idle,
+                RuntimePhase::TargetLoaded => SessionPhase::TargetLoaded,
+                RuntimePhase::Stopped => SessionPhase::Stopped,
+                RuntimePhase::Exited => SessionPhase::Exited,
+                RuntimePhase::Detached => SessionPhase::Detached,
+            },
+            detail,
+            is_busy,
+            has_target: self.has_target(),
+            has_live_process: self.has_live_process,
+            can_restart: self.can_restart(),
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
 struct WorkerRuntime {
     orchestrator: BackendOrchestrator,
     backend_choice: BackendChoice,
+    session: RuntimeSession,
     breakpoints: Vec<Breakpoint>,
     memory_address: u64,
     disassembly_address: Option<u64>,
@@ -534,6 +808,7 @@ impl WorkerRuntime {
         Self {
             orchestrator: BackendOrchestrator::new(make_backend(initial)),
             backend_choice: initial,
+            session: RuntimeSession::default(),
             breakpoints: Vec::new(),
             memory_address: 0x1000,
             disassembly_address: None,
@@ -542,27 +817,45 @@ impl WorkerRuntime {
     }
 
     fn handle_command(&mut self, command: BackendCommand) -> anyhow::Result<BackendSnapshot> {
+        self.session.last_error = None;
+        if let Err(err) = self.apply_command(command) {
+            let message = err.to_string();
+            self.output_lines.push(format!("command failed: {message}"));
+            self.session.note_error(message);
+        }
+
+        self.collect_snapshot()
+    }
+
+    fn apply_command(&mut self, command: BackendCommand) -> anyhow::Result<()> {
         match command {
             BackendCommand::SwitchBackend(choice) => {
                 self.backend_choice = choice;
                 self.orchestrator.replace_backend(make_backend(choice))?;
+                self.session.reset();
                 self.breakpoints.clear();
+                self.memory_address = 0x1000;
+                self.disassembly_address = None;
                 self.output_lines
                     .push(format!("switched backend to {:?}", self.backend_choice));
             }
             BackendCommand::OpenTarget(program) => {
                 self.orchestrator.backend_mut().open_target(&program)?;
+                self.session.set_target_program(program.clone());
                 self.output_lines.push(format!("loaded target {}", program));
             }
             BackendCommand::Launch(target) => {
                 self.orchestrator.backend_mut().launch(LaunchRequest {
                     target: target.clone(),
                 })?;
+                self.session.set_target_program(target.program.clone());
+                self.session.mark_process_stopped();
                 self.output_lines
                     .push(format!("launched {}", target.program));
             }
             BackendCommand::Attach(pid) => {
                 self.orchestrator.backend_mut().attach(pid)?;
+                self.session.set_attached_pid(pid);
                 self.output_lines.push(format!("attached to pid {pid}"));
             }
             BackendCommand::Continue => {
@@ -586,11 +879,14 @@ impl WorkerRuntime {
                 backend.launch(LaunchRequest {
                     target: target.clone(),
                 })?;
+                self.session.set_target_program(target.program.clone());
+                self.session.mark_process_stopped();
                 self.output_lines
                     .push(format!("restarted {}", target.program));
             }
             BackendCommand::Stop => {
                 self.orchestrator.backend_mut().kill()?;
+                self.session.mark_exited();
             }
             BackendCommand::Refresh => {}
             BackendCommand::ToggleBreakpoint(address) => {
@@ -622,11 +918,69 @@ impl WorkerRuntime {
             }
         }
 
-        self.collect_snapshot()
+        Ok(())
     }
 
     fn collect_snapshot(&mut self) -> anyhow::Result<BackendSnapshot> {
         let backend_name = self.orchestrator.backend_name().to_string();
+
+        if !self.session.has_target() {
+            let output_lines = std::mem::take(&mut self.output_lines);
+            return Ok(BackendSnapshot {
+                status_line: format!("backend={backend_name} idle"),
+                session: self.session.to_ui_status(false),
+                stop_reason: StopReason::None,
+                threads: Vec::new(),
+                frames: Vec::new(),
+                disassembly: Vec::new(),
+                function_rows: Vec::new(),
+                registers: None,
+                breakpoints: self.breakpoints.clone(),
+                memory_map_lines: Vec::new(),
+                memory_bytes: Vec::new(),
+                output_lines,
+            });
+        }
+
+        if !self.session.has_live_process && self.session.target_program.is_some() {
+            let mut disassembly = match self.orchestrator.backend_mut().disassemble(
+                self.disassembly_address,
+                if self.disassembly_address.is_some() { 192 } else { 4_096 },
+            ) {
+                Ok(disassembly) => disassembly,
+                Err(err) => {
+                    self.output_lines
+                        .push(format!("snapshot: failed to disassemble loaded target: {err}"));
+                    Vec::new()
+                }
+            };
+
+            let function_rows = build_function_rows(&disassembly);
+            for line in &mut disassembly {
+                line.is_current = false;
+            }
+            let stop_reason = match self.session.phase {
+                RuntimePhase::Exited => StopReason::Exited(0),
+                RuntimePhase::Detached => StopReason::Detached,
+                _ => StopReason::None,
+            };
+            let output_lines = std::mem::take(&mut self.output_lines);
+
+            return Ok(BackendSnapshot {
+                status_line: format!("backend={backend_name} target_loaded"),
+                session: self.session.to_ui_status(false),
+                stop_reason,
+                threads: Vec::new(),
+                frames: Vec::new(),
+                disassembly,
+                function_rows,
+                registers: None,
+                breakpoints: self.breakpoints.clone(),
+                memory_map_lines: Vec::new(),
+                memory_bytes: Vec::new(),
+                output_lines,
+            });
+        }
 
         let stop_reason = match self.orchestrator.backend_mut().current_stop_reason() {
             Ok(reason) => reason,
@@ -675,6 +1029,10 @@ impl WorkerRuntime {
                 None
             }
         };
+
+        let has_live_process = !threads.is_empty() || registers.is_some() || current_ip.is_some();
+        self.session
+            .reconcile_from_snapshot(&stop_reason, has_live_process);
 
         let disassembly_anchor = self.disassembly_address.or(current_ip);
         let disassembly_count = if disassembly_anchor.is_some() {
@@ -768,6 +1126,7 @@ impl WorkerRuntime {
 
         Ok(BackendSnapshot {
             status_line: format!("backend={backend_name} thread_count={}", threads.len()),
+            session: self.session.to_ui_status(false),
             stop_reason,
             threads,
             frames,
@@ -819,4 +1178,63 @@ struct RecentSession {
     program: String,
     args: Vec<String>,
     timestamp_utc: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_without_target_stays_idle_and_quiet() {
+        let mut runtime = WorkerRuntime::new(BackendChoice::Mock);
+        let snapshot = runtime
+            .handle_command(BackendCommand::Refresh)
+            .expect("refresh should succeed");
+
+        assert_eq!(snapshot.session.phase, SessionPhase::Idle);
+        assert!(!snapshot.session.has_target);
+        assert!(snapshot.output_lines.iter().all(|line| !line.contains("failed")));
+        assert!(snapshot.disassembly.is_empty());
+    }
+
+    #[test]
+    fn open_target_creates_non_live_loaded_state() {
+        let mut runtime = WorkerRuntime::new(BackendChoice::Mock);
+        let snapshot = runtime
+            .handle_command(BackendCommand::OpenTarget("/tmp/mock-target".to_string()))
+            .expect("open target should succeed");
+
+        assert_eq!(snapshot.session.phase, SessionPhase::TargetLoaded);
+        assert!(snapshot.session.has_target);
+        assert!(!snapshot.session.has_live_process);
+        assert!(!snapshot.disassembly.is_empty());
+        assert!(snapshot.threads.is_empty());
+    }
+
+    #[test]
+    fn launch_and_stop_transition_through_stopped_and_exited() {
+        let mut runtime = WorkerRuntime::new(BackendChoice::Mock);
+        let target = TargetBinary {
+            program: "/tmp/mock-target".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+        };
+
+        let launched = runtime
+            .handle_command(BackendCommand::Launch(target.clone()))
+            .expect("launch should succeed");
+        assert_eq!(launched.session.phase, SessionPhase::Stopped);
+        assert!(launched.session.has_live_process);
+        assert!(!launched.threads.is_empty());
+
+        let stopped = runtime
+            .handle_command(BackendCommand::Stop)
+            .expect("stop should succeed");
+        assert_eq!(stopped.session.phase, SessionPhase::Exited);
+        assert!(!stopped.session.has_live_process);
+        assert!(stopped.threads.is_empty());
+        assert!(matches!(stopped.stop_reason, StopReason::Exited(_)));
+        assert!(!stopped.disassembly.is_empty());
+    }
 }
