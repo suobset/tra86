@@ -1,8 +1,8 @@
 # tra86
 
-`tra86` is a Rust desktop assembly tracer/debugger experiment. The direction is serious. The current implementation is not yet serious enough.
+`tra86` is a Rust desktop assembly tracer/debugger experiment. It is still currently under development. More coming soon.
 
-As of 2026-03-31, this repo compiles, the app launches, and the LLDB path can drive a real target, but reliability is still below the bar for a systems tool. The most honest status report is [`AUDIT.md`](./AUDIT.md).
+<img width="1894" height="1348" alt="image" src="https://github.com/user-attachments/assets/c3c13a46-be9f-4523-9ee7-474999857156" />
 
 ## Current Status
 
@@ -37,6 +37,8 @@ What is not yet true:
 - disassembly, registers, frames, threads, breakpoints, memory, trace panes
 - LLDB adapter behind a Rust trait instead of embedding LLDB types in the UI
 - a mock backend that is useful for UI work but currently makes the product look farther along than it is
+
+<img width="1894" height="1348" alt="image" src="https://github.com/user-attachments/assets/02cc5944-9b20-4828-84e0-d10165dab086" />
 
 ## Biggest Current Problems
 
