@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -71,6 +72,51 @@ int main(int argc, char **argv) {
 
 fn build_fixture_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     build_fixture_binary_with_sleep(1)
+}
+
+fn build_cpp_fixture_binary(
+    name: &str,
+    source_text: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = unique_fixture_dir();
+    fs::create_dir_all(&dir)?;
+
+    let source = dir.join(format!("{name}.cpp"));
+    let binary = dir.join(name);
+    fs::write(&source, source_text)?;
+
+    let status = Command::new("c++")
+        .arg("-std=c++17")
+        .arg("-g")
+        .arg("-O0")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .status()?;
+    assert!(status.success(), "failed to compile C++ fixture binary");
+
+    Ok(fs::canonicalize(binary)?)
+}
+
+fn spawn_ready_fixture(binary: &Path) -> Result<Child, Box<dyn std::error::Error>> {
+    let mut child = Command::new(binary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("fixture child stdout was not piped")?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    assert!(
+        line.contains("ready"),
+        "fixture did not signal readiness, got: {line:?}"
+    );
+
+    Ok(child)
 }
 
 #[test]
@@ -209,6 +255,163 @@ fn lldb_interrupt_handle_can_pause_running_target() -> Result<(), Box<dyn std::e
         !registers.registers.is_empty(),
         "expected registers to remain readable after interrupt"
     );
+
+    Ok(())
+}
+
+#[test]
+fn lldb_backend_resolves_cpp_symbols_and_source() -> Result<(), Box<dyn std::error::Error>> {
+    if !tool_exists("lldb") || !tool_exists("c++") {
+        eprintln!("skipping LLDB C++ symbol test because lldb or c++ is unavailable");
+        return Ok(());
+    }
+
+    let binary = build_cpp_fixture_binary(
+        "symbol_fixture",
+        r#"#include <iostream>
+
+static int leaf(int value) {
+    return value * 3;
+}
+
+static int compute(int seed) {
+    return leaf(seed + 4);
+}
+
+int main() {
+    int result = compute(7);
+    std::cout << "result=" << result << std::endl;
+    return result;
+}
+"#,
+    )?;
+    let binary_str = binary.to_string_lossy().into_owned();
+
+    let mut backend = LldbBackend::new();
+    backend.open_target(&binary_str)?;
+    backend.launch(LaunchRequest {
+        target: TargetBinary {
+            program: binary_str,
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+        },
+    })?;
+    backend.continue_exec()?;
+
+    let threads = backend.list_threads()?;
+    assert!(
+        !threads.is_empty(),
+        "expected launch to stop with a live thread"
+    );
+    let thread_id = threads[0].id;
+    let frames = backend.list_frames(thread_id)?;
+    assert!(!frames.is_empty(), "expected frames after launch");
+
+    let frame_ip = frames[0].instruction_pointer;
+    let symbol = backend.symbolicate(frame_ip)?;
+    let source = backend.source_location(frame_ip)?;
+
+    let symbol = symbol.expect("expected symbol lookup to return a symbol");
+    let source = source.expect("expected source lookup to return a source location");
+    assert!(
+        !symbol.name.is_empty(),
+        "expected a non-empty symbol name for the current frame"
+    );
+    assert!(
+        symbol.name.contains("main"),
+        "expected to resolve the main symbol, got {}",
+        symbol.name
+    );
+    assert!(
+        source.file.ends_with("symbol_fixture.cpp"),
+        "expected C++ source file in lookup result, got {}",
+        source.file
+    );
+
+    Ok(())
+}
+
+#[test]
+fn lldb_backend_can_attach_to_live_cpp_process_and_list_threads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !tool_exists("lldb") || !tool_exists("c++") {
+        eprintln!("skipping LLDB attach test because lldb or c++ is unavailable");
+        return Ok(());
+    }
+
+    let binary = build_cpp_fixture_binary(
+        "threaded_fixture",
+        r#"#include <atomic>
+#include <chrono>
+#include <iostream>
+#include <thread>
+
+static std::atomic<bool> keep_running{true};
+
+static int busy_work(int value) {
+    if (value <= 1) {
+        return value;
+    }
+    return busy_work(value - 1) + 1;
+}
+
+int main() {
+    std::thread worker([] {
+        while (keep_running.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    });
+
+    std::cout << "ready" << std::endl;
+    std::cout.flush();
+
+    for (int i = 0; i < 300; ++i) {
+        busy_work(12);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    keep_running = false;
+    worker.join();
+    return 0;
+}
+"#,
+    )?;
+
+    let mut child = spawn_ready_fixture(&binary)?;
+    thread::sleep(Duration::from_millis(200));
+
+    let pid = child.id();
+    let mut backend = LldbBackend::new();
+    backend.attach(pid)?;
+
+    let threads = backend.list_threads()?;
+    assert!(
+        threads.len() >= 2,
+        "expected at least two threads after attach, got {}",
+        threads.len()
+    );
+
+    let thread_id = threads
+        .iter()
+        .find(|thread| thread.is_current)
+        .map(|thread| thread.id)
+        .unwrap_or(threads[0].id);
+    let frames = backend.list_frames(thread_id)?;
+    assert!(
+        !frames.is_empty(),
+        "expected stack frames for the selected thread"
+    );
+
+    let registers = backend.read_registers(thread_id)?;
+    assert!(
+        !registers.registers.is_empty(),
+        "expected registers to be readable after attach"
+    );
+
+    backend.detach()?;
+    let _ = child.kill();
+    let _ = child.wait();
 
     Ok(())
 }
