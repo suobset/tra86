@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tra86_backend::{DebugBackend, LaunchRequest};
@@ -25,7 +29,9 @@ fn unique_fixture_dir() -> PathBuf {
     dir
 }
 
-fn build_fixture_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn build_fixture_binary_with_sleep(
+    sleep_seconds: u64,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let dir = unique_fixture_dir();
     fs::create_dir_all(&dir)?;
 
@@ -44,10 +50,11 @@ int main(int argc, char **argv) {
     int computed = twice(argc + 2);
     printf("computed=%d\n", computed);
     fflush(stdout);
-    sleep(1);
+    sleep(SLEEP_SECONDS);
     return computed;
 }
-"#,
+"#
+        .replace("SLEEP_SECONDS", &sleep_seconds.to_string()),
     )?;
 
     let status = Command::new("cc")
@@ -60,6 +67,10 @@ int main(int argc, char **argv) {
     assert!(status.success(), "failed to compile fixture binary");
 
     Ok(fs::canonicalize(binary)?)
+}
+
+fn build_fixture_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    build_fixture_binary_with_sleep(1)
 }
 
 #[test]
@@ -102,7 +113,10 @@ fn lldb_backend_can_launch_and_inspect_real_fixture() -> Result<(), Box<dyn std:
     );
 
     let current_ip = backend.current_instruction(thread_id)?;
-    assert!(current_ip.is_some(), "expected a current instruction pointer");
+    assert!(
+        current_ip.is_some(),
+        "expected a current instruction pointer"
+    );
 
     let disassembly = backend.disassemble(None, 32)?;
     assert!(!disassembly.is_empty(), "expected post-launch disassembly");
@@ -118,7 +132,83 @@ fn lldb_backend_can_launch_and_inspect_real_fixture() -> Result<(), Box<dyn std:
 
     backend.step_into()?;
     let stepped_disassembly = backend.disassemble(None, 16)?;
-    assert!(!stepped_disassembly.is_empty(), "expected disassembly after step");
+    assert!(
+        !stepped_disassembly.is_empty(),
+        "expected disassembly after step"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn lldb_interrupt_handle_can_pause_running_target() -> Result<(), Box<dyn std::error::Error>> {
+    if !tool_exists("lldb") || !Path::new("/usr/bin/cc").exists() {
+        eprintln!("skipping LLDB interrupt test because lldb or cc is unavailable");
+        return Ok(());
+    }
+
+    let binary = build_fixture_binary_with_sleep(10)?;
+    let binary_str = binary.to_string_lossy().into_owned();
+    let backend = Arc::new(Mutex::new(LldbBackend::new()));
+
+    {
+        let mut backend = backend.lock().expect("backend mutex should lock");
+        backend.open_target(&binary_str)?;
+        backend.launch(LaunchRequest {
+            target: TargetBinary {
+                program: binary_str.clone(),
+                args: Vec::new(),
+                cwd: None,
+                env: Vec::new(),
+            },
+        })?;
+    }
+
+    let control = backend
+        .lock()
+        .expect("backend mutex should lock")
+        .control_handle()
+        .expect("lldb backend should expose a control handle");
+
+    let continue_started = Instant::now();
+    let continue_thread = {
+        let backend = Arc::clone(&backend);
+        thread::spawn(move || -> Result<(), String> {
+            let mut backend = backend
+                .lock()
+                .map_err(|_| "backend mutex poisoned".to_string())?;
+            backend.continue_exec().map_err(|err| err.to_string())
+        })
+    };
+
+    thread::sleep(Duration::from_millis(500));
+    control.interrupt()?;
+
+    let continue_result = continue_thread
+        .join()
+        .expect("continue thread should not panic");
+    assert!(
+        continue_result.is_ok(),
+        "continue after interrupt should succeed: {:?}",
+        continue_result.err()
+    );
+    assert!(
+        continue_started.elapsed() < Duration::from_secs(6),
+        "interrupt should stop a blocking continue well before the fixture exits"
+    );
+
+    let mut backend = backend.lock().expect("backend mutex should lock");
+    let threads = backend.list_threads()?;
+    assert!(
+        !threads.is_empty(),
+        "expected debugger to remain attached after interrupt"
+    );
+    let thread_id = threads[0].id;
+    let registers = backend.read_registers(thread_id)?;
+    assert!(
+        !registers.registers.is_empty(),
+        "expected registers to remain readable after interrupt"
+    );
 
     Ok(())
 }

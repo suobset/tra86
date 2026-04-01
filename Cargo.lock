@@ -3241,6 +3241,7 @@ dependencies = [
 name = "tra86-backend-lldb"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "serde_json",
  "thiserror 1.0.69",
  "tra86-backend",

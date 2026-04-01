@@ -25,6 +25,7 @@ pub enum BottomTab {
 pub enum SessionPhase {
     Idle,
     TargetLoaded,
+    Running,
     Stopped,
     Exited,
     Detached,
@@ -57,35 +58,36 @@ impl Default for SessionStatus {
 
 impl SessionStatus {
     pub fn can_attach(&self) -> bool {
-        !self.is_busy && !self.has_live_process
+        !self.is_busy && !self.has_live_process && !matches!(self.phase, SessionPhase::Running)
     }
 
     pub fn can_continue(&self) -> bool {
-        !self.is_busy && self.has_live_process
+        !self.is_busy && matches!(self.phase, SessionPhase::Stopped)
     }
 
     pub fn can_pause(&self) -> bool {
-        !self.is_busy && self.has_live_process
+        matches!(self.phase, SessionPhase::Running)
     }
 
     pub fn can_step(&self) -> bool {
-        !self.is_busy && self.has_live_process
+        !self.is_busy && matches!(self.phase, SessionPhase::Stopped)
     }
 
     pub fn can_stop(&self) -> bool {
-        !self.is_busy && self.has_live_process
+        matches!(self.phase, SessionPhase::Running)
+            || (!self.is_busy && matches!(self.phase, SessionPhase::Stopped))
     }
 
     pub fn can_refresh(&self) -> bool {
-        !self.is_busy && self.has_target
+        !self.is_busy && self.has_target && !matches!(self.phase, SessionPhase::Running)
     }
 
     pub fn can_toggle_breakpoint(&self) -> bool {
-        !self.is_busy && self.has_target
+        !self.is_busy && self.has_target && !matches!(self.phase, SessionPhase::Running)
     }
 
     pub fn can_jump_memory(&self) -> bool {
-        !self.is_busy && self.has_live_process
+        !self.is_busy && matches!(self.phase, SessionPhase::Stopped)
     }
 }
 
@@ -353,7 +355,10 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
 
             ui.menu_button("Analysis", |ui| {
                 if ui
-                    .add_enabled(model.session.can_refresh(), egui::Button::new("Refresh State"))
+                    .add_enabled(
+                        model.session.can_refresh(),
+                        egui::Button::new("Refresh State"),
+                    )
                     .clicked()
                 {
                     events.push(UiEvent::Refresh);
@@ -458,7 +463,11 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
         if let Some(error) = &model.session.last_error {
             ui.separator();
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Last error:").strong().color(Color32::LIGHT_RED));
+                ui.label(
+                    RichText::new("Last error:")
+                        .strong()
+                        .color(Color32::LIGHT_RED),
+                );
                 ui.label(RichText::new(error).color(Color32::LIGHT_RED));
             });
         }
@@ -466,7 +475,9 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
 }
 
 fn control_buttons(ui: &mut egui::Ui, model: &UiModel, events: &mut Vec<UiEvent>) {
-    let primary_label = if model.session.is_busy {
+    let primary_label = if matches!(model.session.phase, SessionPhase::Running) {
+        "Running..."
+    } else if model.session.is_busy {
         "Working..."
     } else if model.session.can_continue() {
         "Continue"
@@ -988,6 +999,7 @@ fn session_color(phase: SessionPhase, is_busy: bool) -> Color32 {
     match phase {
         SessionPhase::Idle => Color32::GRAY,
         SessionPhase::TargetLoaded => Color32::LIGHT_BLUE,
+        SessionPhase::Running => Color32::LIGHT_GREEN,
         SessionPhase::Stopped => Color32::LIGHT_GREEN,
         SessionPhase::Exited => Color32::LIGHT_RED,
         SessionPhase::Detached => Color32::KHAKI,

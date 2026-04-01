@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -8,7 +8,9 @@ use chrono::Utc;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use tra86_analysis::{build_delta, compute_register_delta};
-use tra86_backend::{BackendOrchestrator, DebugBackend, LaunchRequest, MockBackend};
+use tra86_backend::{
+    BackendControlHandle, BackendOrchestrator, DebugBackend, LaunchRequest, MockBackend,
+};
 use tra86_backend_lldb::LldbBackend;
 use tra86_core::{
     Breakpoint, BreakpointLocation, DisassemblyLine, InstructionRecord, RegisterBank, StopReason,
@@ -109,7 +111,11 @@ impl Tra86App {
         self.ui.memory_bytes.clear();
     }
 
-    fn queue_backend_command(&mut self, command: BackendCommand, pending_detail: impl Into<String>) {
+    fn queue_backend_command(
+        &mut self,
+        command: BackendCommand,
+        pending_detail: impl Into<String>,
+    ) {
         self.ui.session.is_busy = true;
         self.ui.session.last_error = None;
         self.ui.status_line = pending_detail.into();
@@ -155,7 +161,9 @@ impl Tra86App {
             }
             UiEvent::Launch => {
                 if self.ui.session.is_busy {
-                    self.push_ui_error("Launch is not available while another backend operation is running");
+                    self.push_ui_error(
+                        "Launch is not available while another backend operation is running",
+                    );
                     return;
                 }
                 if self.ui.executable_path.trim().is_empty() {
@@ -186,7 +194,10 @@ impl Tra86App {
                 if let Ok(pid) = self.ui.attach_pid.trim().parse::<u32>() {
                     self.reset_trace_for_new_session();
                     self.clear_live_views();
-                    self.queue_backend_command(BackendCommand::Attach(pid), format!("Attaching to pid {pid}"));
+                    self.queue_backend_command(
+                        BackendCommand::Attach(pid),
+                        format!("Attaching to pid {pid}"),
+                    );
                 } else {
                     self.push_ui_error("Attach PID is invalid");
                 }
@@ -231,7 +242,9 @@ impl Tra86App {
                     self.push_ui_error("Restart is not available in the current session state");
                     return;
                 }
-                if self.ui.executable_path.trim().is_empty() || !Path::new(self.ui.executable_path.trim()).exists() {
+                if self.ui.executable_path.trim().is_empty()
+                    || !Path::new(self.ui.executable_path.trim()).exists()
+                {
                     self.push_ui_error("Set a valid executable path before restart");
                     return;
                 }
@@ -431,6 +444,11 @@ impl Tra86App {
                     }
                 }
             }
+            WorkerMessage::SessionUpdate(update) => {
+                self.ui.status_line = update.status_line;
+                self.ui.session = update.session;
+                self.ui.output_lines.extend(update.output_lines);
+            }
             WorkerMessage::Error(error) => {
                 self.ui.session.is_busy = false;
                 self.ui.session.last_error = Some(error.clone());
@@ -567,6 +585,12 @@ struct BackendWorker {
     rx: Receiver<WorkerMessage>,
 }
 
+struct InFlightContinue {
+    completion_rx: Receiver<(WorkerRuntime, anyhow::Result<BackendSnapshot>)>,
+    control: Option<BackendControlHandle>,
+    session: SessionStatus,
+}
+
 impl BackendWorker {
     fn spawn(initial: BackendChoice) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
@@ -575,9 +599,122 @@ impl BackendWorker {
         // Backend calls run off the UI thread so disassembly/memory operations
         // do not block egui frame updates.
         thread::spawn(move || {
-            let mut runtime = WorkerRuntime::new(initial);
-            while let Ok(command) = command_rx.recv() {
-                let result = runtime.handle_command(command);
+            let mut runtime = Some(WorkerRuntime::new(initial));
+            let mut in_flight: Option<InFlightContinue> = None;
+
+            loop {
+                if let Some(active) = in_flight.as_mut() {
+                    match active.completion_rx.try_recv() {
+                        Ok((returned_runtime, result)) => {
+                            runtime = Some(returned_runtime);
+                            in_flight = None;
+                            match result {
+                                Ok(snapshot) => {
+                                    let _ = event_tx.send(WorkerMessage::Snapshot(snapshot));
+                                }
+                                Err(err) => {
+                                    let _ = event_tx.send(WorkerMessage::Error(err.to_string()));
+                                }
+                            }
+                            continue;
+                        }
+                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected) => {
+                            in_flight = None;
+                            let _ = event_tx.send(WorkerMessage::Error(
+                                "backend continue task disconnected".to_string(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+
+                let command = match command_rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok(command) => command,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+
+                if let Some(active) = in_flight.as_mut() {
+                    let result = match command {
+                        BackendCommand::Pause => active
+                            .control
+                            .as_ref()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "current backend cannot pause a running target asynchronously"
+                                )
+                            })
+                            .and_then(|control| control.interrupt().map_err(anyhow::Error::from))
+                            .map(|_| SessionUpdate {
+                                status_line: "backend interrupt requested".to_string(),
+                                session: SessionStatus {
+                                    detail: "Pause requested".to_string(),
+                                    ..active.session.clone()
+                                },
+                                output_lines: Vec::new(),
+                            }),
+                        BackendCommand::Stop => active
+                            .control
+                            .as_ref()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "current backend cannot stop a running target asynchronously"
+                                )
+                            })
+                            .and_then(|control| control.terminate().map_err(anyhow::Error::from))
+                            .map(|_| SessionUpdate {
+                                status_line: "backend termination requested".to_string(),
+                                session: SessionStatus {
+                                    detail: "Stop requested".to_string(),
+                                    ..active.session.clone()
+                                },
+                                output_lines: Vec::new(),
+                            }),
+                        _ => Err(anyhow::anyhow!(
+                            "command is unavailable while the target is running"
+                        )),
+                    };
+
+                    match result {
+                        Ok(update) => {
+                            active.session = update.session.clone();
+                            let _ = event_tx.send(WorkerMessage::SessionUpdate(update));
+                        }
+                        Err(err) => {
+                            let _ = event_tx.send(WorkerMessage::Error(err.to_string()));
+                        }
+                    }
+                    continue;
+                }
+
+                let Some(mut ready_runtime) = runtime.take() else {
+                    let _ = event_tx.send(WorkerMessage::Error(
+                        "backend runtime became unavailable".to_string(),
+                    ));
+                    break;
+                };
+
+                if matches!(command, BackendCommand::Continue) {
+                    let update = ready_runtime.begin_running("Running target");
+                    let control = ready_runtime.control_handle();
+                    let session = update.session.clone();
+                    let (completion_tx, completion_rx) = mpsc::channel();
+                    thread::spawn(move || {
+                        let result = ready_runtime.handle_command(BackendCommand::Continue);
+                        let _ = completion_tx.send((ready_runtime, result));
+                    });
+                    let _ = event_tx.send(WorkerMessage::SessionUpdate(update));
+                    in_flight = Some(InFlightContinue {
+                        completion_rx,
+                        control,
+                        session,
+                    });
+                    continue;
+                }
+
+                let result = ready_runtime.handle_command(command);
+                runtime = Some(ready_runtime);
                 match result {
                     Ok(snapshot) => {
                         let _ = event_tx.send(WorkerMessage::Snapshot(snapshot));
@@ -633,7 +770,15 @@ enum BackendCommand {
 #[derive(Debug)]
 enum WorkerMessage {
     Snapshot(BackendSnapshot),
+    SessionUpdate(SessionUpdate),
     Error(String),
+}
+
+#[derive(Debug)]
+struct SessionUpdate {
+    status_line: String,
+    session: SessionStatus,
+    output_lines: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -656,6 +801,7 @@ struct BackendSnapshot {
 enum RuntimePhase {
     Idle,
     TargetLoaded,
+    Running,
     Stopped,
     Exited,
     Detached,
@@ -711,6 +857,12 @@ impl RuntimeSession {
         self.last_error = None;
     }
 
+    fn mark_process_running(&mut self) {
+        self.has_live_process = true;
+        self.phase = RuntimePhase::Running;
+        self.last_error = None;
+    }
+
     fn mark_process_stopped(&mut self) {
         self.has_live_process = true;
         self.phase = RuntimePhase::Stopped;
@@ -761,6 +913,15 @@ impl RuntimeSession {
                     .as_ref()
                     .map(|program| format!("Target loaded: {program}"))
                     .unwrap_or_else(|| "Target loaded".to_string()),
+                RuntimePhase::Running => {
+                    if let Some(pid) = self.attached_pid {
+                        format!("Running attached process {pid}")
+                    } else if let Some(program) = &self.target_program {
+                        format!("Running {program}")
+                    } else {
+                        "Running".to_string()
+                    }
+                }
                 RuntimePhase::Stopped => {
                     if let Some(pid) = self.attached_pid {
                         format!("Attached to pid {pid} and stopped")
@@ -779,6 +940,7 @@ impl RuntimeSession {
             phase: match self.phase {
                 RuntimePhase::Idle => SessionPhase::Idle,
                 RuntimePhase::TargetLoaded => SessionPhase::TargetLoaded,
+                RuntimePhase::Running => SessionPhase::Running,
                 RuntimePhase::Stopped => SessionPhase::Stopped,
                 RuntimePhase::Exited => SessionPhase::Exited,
                 RuntimePhase::Detached => SessionPhase::Detached,
@@ -787,6 +949,18 @@ impl RuntimeSession {
             is_busy,
             has_target: self.has_target(),
             has_live_process: self.has_live_process,
+            can_restart: self.can_restart(),
+            last_error: self.last_error.clone(),
+        }
+    }
+
+    fn to_running_ui_status(&self, detail: impl Into<String>) -> SessionStatus {
+        SessionStatus {
+            phase: SessionPhase::Running,
+            detail: detail.into(),
+            is_busy: true,
+            has_target: self.has_target(),
+            has_live_process: true,
             can_restart: self.can_restart(),
             last_error: self.last_error.clone(),
         }
@@ -827,6 +1001,19 @@ impl WorkerRuntime {
         self.collect_snapshot()
     }
 
+    fn control_handle(&self) -> Option<BackendControlHandle> {
+        self.orchestrator.backend().control_handle()
+    }
+
+    fn begin_running(&mut self, detail: impl Into<String>) -> SessionUpdate {
+        self.session.mark_process_running();
+        SessionUpdate {
+            status_line: "backend running".to_string(),
+            session: self.session.to_running_ui_status(detail),
+            output_lines: Vec::new(),
+        }
+    }
+
     fn apply_command(&mut self, command: BackendCommand) -> anyhow::Result<()> {
         match command {
             BackendCommand::SwitchBackend(choice) => {
@@ -859,6 +1046,7 @@ impl WorkerRuntime {
                 self.output_lines.push(format!("attached to pid {pid}"));
             }
             BackendCommand::Continue => {
+                self.output_lines.push("continued target".to_string());
                 self.orchestrator.backend_mut().continue_exec()?;
             }
             BackendCommand::Pause => {
@@ -945,12 +1133,17 @@ impl WorkerRuntime {
         if !self.session.has_live_process && self.session.target_program.is_some() {
             let mut disassembly = match self.orchestrator.backend_mut().disassemble(
                 self.disassembly_address,
-                if self.disassembly_address.is_some() { 192 } else { 4_096 },
+                if self.disassembly_address.is_some() {
+                    192
+                } else {
+                    4_096
+                },
             ) {
                 Ok(disassembly) => disassembly,
                 Err(err) => {
-                    self.output_lines
-                        .push(format!("snapshot: failed to disassemble loaded target: {err}"));
+                    self.output_lines.push(format!(
+                        "snapshot: failed to disassemble loaded target: {err}"
+                    ));
                     Vec::new()
                 }
             };
@@ -1000,7 +1193,11 @@ impl WorkerRuntime {
             }
         };
         let current_thread_id = threads.first().map(|t| t.id).unwrap_or(1);
-        let frames = match self.orchestrator.backend_mut().list_frames(current_thread_id) {
+        let frames = match self
+            .orchestrator
+            .backend_mut()
+            .list_frames(current_thread_id)
+        {
             Ok(frames) => frames,
             Err(err) => {
                 self.output_lines
@@ -1009,7 +1206,11 @@ impl WorkerRuntime {
             }
         };
 
-        let registers = match self.orchestrator.backend_mut().read_registers(current_thread_id) {
+        let registers = match self
+            .orchestrator
+            .backend_mut()
+            .read_registers(current_thread_id)
+        {
             Ok(registers) => Some(registers),
             Err(err) => {
                 self.output_lines
@@ -1024,8 +1225,9 @@ impl WorkerRuntime {
         {
             Ok(ip) => ip,
             Err(err) => {
-                self.output_lines
-                    .push(format!("snapshot: failed to read current instruction: {err}"));
+                self.output_lines.push(format!(
+                    "snapshot: failed to read current instruction: {err}"
+                ));
                 None
             }
         };
@@ -1064,16 +1266,16 @@ impl WorkerRuntime {
                 line.is_current = line.address == ip;
             }
         }
-        let program_tree_disassembly = match self.orchestrator.backend_mut().disassemble(None, 4_096)
-        {
-            Ok(disassembly) => disassembly,
-            Err(err) => {
-                self.output_lines.push(format!(
-                    "snapshot: failed to load full program disassembly: {err}"
-                ));
-                disassembly.clone()
-            }
-        };
+        let program_tree_disassembly =
+            match self.orchestrator.backend_mut().disassemble(None, 4_096) {
+                Ok(disassembly) => disassembly,
+                Err(err) => {
+                    self.output_lines.push(format!(
+                        "snapshot: failed to load full program disassembly: {err}"
+                    ));
+                    disassembly.clone()
+                }
+            };
         let function_rows = build_function_rows(&program_tree_disassembly);
 
         let memory_map = match self.orchestrator.backend_mut().memory_map() {
@@ -1193,7 +1395,10 @@ mod tests {
 
         assert_eq!(snapshot.session.phase, SessionPhase::Idle);
         assert!(!snapshot.session.has_target);
-        assert!(snapshot.output_lines.iter().all(|line| !line.contains("failed")));
+        assert!(snapshot
+            .output_lines
+            .iter()
+            .all(|line| !line.contains("failed")));
         assert!(snapshot.disassembly.is_empty());
     }
 
