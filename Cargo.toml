@@ -25,6 +25,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
-egui_extras = "0.31"
-egui_dock = "0.16"
 anyhow = "1"

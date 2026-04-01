@@ -9,9 +9,9 @@ As of 2026-03-31, this repo compiles, the app launches, and the LLDB path can dr
 What is verified right now:
 
 - `cargo check` passes
-- `cargo test` passes, but there are effectively no meaningful tests yet
+- `cargo test` passes with analysis tests, LLDB parser tests, and a real LLDB smoke test against a compiled native fixture
 - `cargo run -p tra86-app` launches the desktop app
-- the LLDB smoke binary can launch and disassemble a real fixture program
+- the LLDB smoke binary can launch, inspect, read memory from, and step through a real fixture program
 
 What is not yet true:
 
@@ -40,9 +40,9 @@ What is not yet true:
 ## Biggest Current Problems
 
 - the LLDB adapter is text-protocol brittle
-- register handling is architecture-fragile
-- error handling often hides backend faults by returning empty UI data
-- tests are almost nonexistent
+- there is still no explicit session state machine
+- some backend failure paths are now surfaced in the UI, but lifecycle recovery is still incomplete
+- test coverage is now real but still thin compared to the size of the product goal
 - some abstractions are more decorative than proven
 
 ## Build And Run
@@ -66,6 +66,8 @@ Useful smoke check:
 ```bash
 cargo run -p tra86-app --bin lldb_smoke -- /path/to/debuggable/binary
 ```
+
+Performance notes and current hotspots live in [`PERF.md`](./PERF.md).
 
 ## Direction
 
