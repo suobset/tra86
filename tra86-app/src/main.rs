@@ -98,6 +98,9 @@ impl Tra86App {
         self.trace.clear();
         self.ui.trace.clear();
         self.ui.register_diffs.clear();
+        self.ui.terminal_output.clear();
+        self.ui.terminal_input.clear();
+        self.ui.terminal_connected = false;
     }
 
     fn clear_live_views(&mut self) {
@@ -312,10 +315,18 @@ impl Tra86App {
                 );
             }
             UiEvent::ClearOutput => self.ui.output_lines.clear(),
+            UiEvent::ClearTerminal => self.ui.terminal_output.clear(),
             UiEvent::ClearTrace => {
                 self.reset_trace_for_new_session();
             }
             UiEvent::SetBottomTab(tab) => self.ui.bottom_tab = tab,
+            UiEvent::SubmitTerminalInput(input) => {
+                if !self.ui.terminal_connected {
+                    self.push_ui_error("No live target terminal is available");
+                    return;
+                }
+                self.worker.send(BackendCommand::SendTerminalInput(input));
+            }
             UiEvent::JumpToCurrentInstruction => {
                 if let Some(line) = self.ui.disassembly.iter().find(|line| line.is_current) {
                     self.ui.memory_base_input = format!("0x{:x}", line.address);
@@ -346,6 +357,8 @@ impl Tra86App {
                 self.ui.breakpoints = snapshot.breakpoints;
                 self.ui.memory_map_lines = snapshot.memory_map_lines;
                 self.ui.memory_bytes = snapshot.memory_bytes;
+                self.ui.terminal_connected = snapshot.terminal_connected;
+                self.ui.terminal_output.push_str(&snapshot.terminal_output);
                 self.ui.output_lines.extend(snapshot.output_lines);
                 self.ui.analysis_lines = build_analysis_lines(&self.ui.disassembly, &self.trace);
                 if !self.ui.session.has_live_process {
@@ -446,6 +459,9 @@ impl Tra86App {
                 self.ui.status_line = update.status_line;
                 self.ui.session = update.session;
                 self.ui.output_lines.extend(update.output_lines);
+            }
+            WorkerMessage::TerminalOutput(output) => {
+                self.ui.terminal_output.push_str(&output);
             }
             WorkerMessage::Error(error) => {
                 self.ui.session.is_busy = false;
@@ -585,6 +601,7 @@ struct BackendWorker {
 
 struct InFlightContinue {
     completion_rx: Receiver<(WorkerRuntime, anyhow::Result<BackendSnapshot>)>,
+    terminal: Option<tra86_backend::SharedTerminal>,
 }
 
 impl BackendWorker {
@@ -600,6 +617,12 @@ impl BackendWorker {
 
             loop {
                 if let Some(active) = in_flight.as_mut() {
+                    if let Some(terminal) = active.terminal.as_ref() {
+                        let output = terminal.drain_output();
+                        if !output.is_empty() {
+                            let _ = event_tx.send(WorkerMessage::TerminalOutput(output));
+                        }
+                    }
                     match active.completion_rx.try_recv() {
                         Ok((returned_runtime, result)) => {
                             runtime = Some(returned_runtime);
@@ -632,6 +655,20 @@ impl BackendWorker {
                 };
 
                 if in_flight.is_some() {
+                    if let (Some(active), BackendCommand::SendTerminalInput(input)) =
+                        (in_flight.as_ref(), &command)
+                    {
+                        if let Some(terminal) = active.terminal.as_ref() {
+                            if let Err(err) = terminal.write_input(input) {
+                                let _ = event_tx.send(WorkerMessage::Error(err.to_string()));
+                            }
+                        } else {
+                            let _ = event_tx.send(WorkerMessage::Error(
+                                "live target has no interactive terminal".to_string(),
+                            ));
+                        }
+                        continue;
+                    }
                     let _ = event_tx.send(WorkerMessage::Error(match command {
                         BackendCommand::Pause => {
                             "pause is not reliable on the current LLDB CLI transport".to_string()
@@ -654,13 +691,17 @@ impl BackendWorker {
 
                 if matches!(command, BackendCommand::Continue) {
                     let update = ready_runtime.begin_running("Running target");
+                    let terminal = ready_runtime.terminal_io();
                     let (completion_tx, completion_rx) = mpsc::channel();
                     thread::spawn(move || {
                         let result = ready_runtime.handle_command(BackendCommand::Continue);
                         let _ = completion_tx.send((ready_runtime, result));
                     });
                     let _ = event_tx.send(WorkerMessage::SessionUpdate(update));
-                    in_flight = Some(InFlightContinue { completion_rx });
+                    in_flight = Some(InFlightContinue {
+                        completion_rx,
+                        terminal,
+                    });
                     continue;
                 }
 
@@ -712,6 +753,7 @@ enum BackendCommand {
     Restart(TargetBinary),
     Stop,
     Refresh,
+    SendTerminalInput(String),
     ToggleBreakpoint(u64),
     RemoveBreakpoint(u64),
     JumpMemory(u64),
@@ -722,6 +764,7 @@ enum BackendCommand {
 enum WorkerMessage {
     Snapshot(BackendSnapshot),
     SessionUpdate(SessionUpdate),
+    TerminalOutput(String),
     Error(String),
 }
 
@@ -745,6 +788,8 @@ struct BackendSnapshot {
     breakpoints: Vec<Breakpoint>,
     memory_map_lines: Vec<String>,
     memory_bytes: Vec<u8>,
+    terminal_connected: bool,
+    terminal_output: String,
     output_lines: Vec<String>,
 }
 
@@ -952,6 +997,10 @@ impl WorkerRuntime {
         self.collect_snapshot()
     }
 
+    fn terminal_io(&self) -> Option<tra86_backend::SharedTerminal> {
+        self.orchestrator.backend().terminal_io()
+    }
+
     fn begin_running(&mut self, detail: impl Into<String>) -> SessionUpdate {
         self.session.mark_process_running();
         SessionUpdate {
@@ -1024,6 +1073,13 @@ impl WorkerRuntime {
                 self.session.mark_exited();
             }
             BackendCommand::Refresh => {}
+            BackendCommand::SendTerminalInput(input) => {
+                if let Some(terminal) = self.terminal_io() {
+                    terminal.write_input(&input)?;
+                } else {
+                    anyhow::bail!("live target has no interactive terminal");
+                }
+            }
             BackendCommand::ToggleBreakpoint(address) => {
                 if let Some(existing_id) = self.breakpoints.iter().find_map(|bp| {
                     matches!(bp.location, BreakpointLocation::Address(addr) if addr == address)
@@ -1073,6 +1129,8 @@ impl WorkerRuntime {
                 breakpoints: self.breakpoints.clone(),
                 memory_map_lines: Vec::new(),
                 memory_bytes: Vec::new(),
+                terminal_connected: false,
+                terminal_output: String::new(),
                 output_lines,
             });
         }
@@ -1118,6 +1176,8 @@ impl WorkerRuntime {
                 breakpoints: self.breakpoints.clone(),
                 memory_map_lines: Vec::new(),
                 memory_bytes: Vec::new(),
+                terminal_connected: false,
+                terminal_output: String::new(),
                 output_lines,
             });
         }
@@ -1271,6 +1331,11 @@ impl WorkerRuntime {
             }
         };
 
+        let terminal_output = self
+            .terminal_io()
+            .map(|terminal| terminal.drain_output())
+            .unwrap_or_default();
+        let terminal_connected = self.terminal_io().is_some();
         let output_lines = std::mem::take(&mut self.output_lines);
 
         Ok(BackendSnapshot {
@@ -1285,6 +1350,8 @@ impl WorkerRuntime {
             breakpoints: self.breakpoints.clone(),
             memory_map_lines,
             memory_bytes,
+            terminal_connected,
+            terminal_output,
             output_lines,
         })
     }

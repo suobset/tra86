@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::mem::MaybeUninit;
+use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tra86_backend::{BackendError, DebugBackend, LaunchRequest};
+use tra86_backend::{BackendError, DebugBackend, LaunchRequest, SharedTerminal, TerminalIo};
 use tra86_core::{
     Address, Breakpoint, BreakpointId, BreakpointLocation, DisassemblyLine, FrameState,
     MemoryPermissions, MemoryRegion, RegisterBank, RegisterRole, RegisterValue, SourceLocation,
@@ -19,6 +22,7 @@ pub struct LldbBackend {
     process: Option<LldbProcess>,
     target_program: Option<String>,
     attached_pid: Option<u32>,
+    terminal: Option<SharedTerminal>,
     text_range: Option<(Address, Address)>,
     static_disassembly: Vec<DisassemblyLine>,
     breakpoints: Vec<Breakpoint>,
@@ -134,6 +138,7 @@ impl Default for LldbBackend {
             process: None,
             target_program: None,
             attached_pid: None,
+            terminal: None,
             text_range: None,
             static_disassembly: Vec::new(),
             breakpoints: Vec::new(),
@@ -151,6 +156,7 @@ impl DebugBackend for LldbBackend {
     fn open_target(&mut self, program: &str) -> Result<(), BackendError> {
         let normalized_program = normalize_target_path(program)?;
         self.target_program = Some(normalized_program.clone());
+        self.terminal = None;
         self.ensure_process()?;
         let _ = self.run_command("target delete 0");
         let output = self.run_command(&format!(
@@ -166,8 +172,12 @@ impl DebugBackend for LldbBackend {
 
     fn launch(&mut self, request: LaunchRequest) -> Result<(), BackendError> {
         let normalized_program = normalize_target_path(&request.target.program)?;
+        let terminal = Arc::new(InferiorTerminal::new()?);
+        let slave_path = terminal.slave_path.clone();
+        let terminal: SharedTerminal = terminal;
 
         self.target_program = Some(normalized_program.clone());
+        self.terminal = Some(terminal.clone());
         self.ensure_process()?;
 
         let _ = self.run_command("target delete 0");
@@ -185,7 +195,10 @@ impl DebugBackend for LldbBackend {
             commands.push(format!("settings set target.run-args {args}"));
         }
 
-        commands.push("process launch --stop-at-user-entry".to_string());
+        commands.push(format!(
+            "process launch --tty {} --stop-at-user-entry",
+            lldb_quote(&slave_path)
+        ));
 
         let output = self.run_commands(&commands)?;
         self.attached_pid = parse_pid(&output);
@@ -202,6 +215,7 @@ impl DebugBackend for LldbBackend {
     }
 
     fn attach(&mut self, pid: u32) -> Result<(), BackendError> {
+        self.terminal = None;
         let output = self.run_command(&format!("process attach --pid {pid}"))?;
         self.attached_pid = Some(pid);
         self.update_stop_reason_from_output(&output);
@@ -211,6 +225,7 @@ impl DebugBackend for LldbBackend {
     fn detach(&mut self) -> Result<(), BackendError> {
         let output = self.run_command("process detach")?;
         self.attached_pid = None;
+        self.terminal = None;
         self.update_stop_reason_from_output(&output);
         self.last_stop_reason = StopReason::Detached;
         Ok(())
@@ -221,6 +236,7 @@ impl DebugBackend for LldbBackend {
         self.update_stop_reason_from_output(&output);
         self.last_stop_reason = StopReason::Exited(0);
         self.attached_pid = None;
+        self.terminal = None;
         Ok(())
     }
 
@@ -510,7 +526,12 @@ impl DebugBackend for LldbBackend {
             ("memory_map".to_string(), true),
             ("symbolicate".to_string(), true),
             ("source_location".to_string(), true),
+            ("terminal_io".to_string(), self.terminal.is_some()),
         ])
+    }
+
+    fn terminal_io(&self) -> Option<SharedTerminal> {
+        self.terminal.clone()
     }
 }
 
@@ -529,6 +550,77 @@ struct LldbProcess {
     child: Child,
     stdin: ChildStdin,
     lines_rx: Receiver<String>,
+}
+
+struct InferiorTerminal {
+    slave_path: String,
+    writer: Mutex<std::fs::File>,
+    pending_output: Arc<Mutex<Vec<String>>>,
+}
+
+impl InferiorTerminal {
+    fn new() -> Result<Self, BackendError> {
+        let (master_fd, slave_fd) = open_pty()?;
+        let slave_path = tty_name(slave_fd)?;
+        close_fd(slave_fd);
+
+        let writer = unsafe { std::fs::File::from_raw_fd(master_fd) };
+        let mut reader = writer
+            .try_clone()
+            .map_err(|err| BackendError::Io(format!("failed to clone PTY master: {err}")))?;
+        let pending_output = Arc::new(Mutex::new(Vec::new()));
+        let output = pending_output.clone();
+
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        let chunk = String::from_utf8_lossy(&buffer[..read]).to_string();
+                        if let Ok(mut pending) = output.lock() {
+                            pending.push(chunk);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            slave_path,
+            writer: Mutex::new(writer),
+            pending_output,
+        })
+    }
+}
+
+impl TerminalIo for InferiorTerminal {
+    fn write_input(&self, input: &str) -> Result<(), BackendError> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| BackendError::Internal("terminal writer poisoned".to_string()))?;
+        writer
+            .write_all(input.as_bytes())
+            .map_err(|err| BackendError::Io(format!("failed to write target stdin: {err}")))?;
+        writer
+            .flush()
+            .map_err(|err| BackendError::Io(format!("failed to flush target stdin: {err}")))?;
+        Ok(())
+    }
+
+    fn drain_output(&self) -> String {
+        let Ok(mut pending) = self.pending_output.lock() else {
+            return String::new();
+        };
+        if pending.is_empty() {
+            return String::new();
+        }
+        let joined = pending.join("");
+        pending.clear();
+        joined
+    }
 }
 
 impl LldbProcess {
@@ -705,6 +797,41 @@ fn spawn_lldb_with_pty_fallback() -> Result<Child, BackendError> {
     Err(BackendError::Unavailable(
         "failed to start lldb process".to_string(),
     ))
+}
+
+fn open_pty() -> Result<(RawFd, RawFd), BackendError> {
+    let mut master = MaybeUninit::<libc::c_int>::uninit();
+    let mut slave = MaybeUninit::<libc::c_int>::uninit();
+    let result = unsafe {
+        libc::openpty(
+            master.as_mut_ptr(),
+            slave.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result != 0 {
+        return Err(BackendError::Io("failed to allocate PTY".to_string()));
+    }
+    Ok(unsafe { (master.assume_init(), slave.assume_init()) })
+}
+
+fn tty_name(fd: RawFd) -> Result<String, BackendError> {
+    let mut buf = [0_u8; 1024];
+    let result = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if result != 0 {
+        return Err(BackendError::Io("failed to resolve PTY path".to_string()));
+    }
+    let len = buf.iter().position(|byte| *byte == 0).unwrap_or(buf.len());
+    String::from_utf8(buf[..len].to_vec())
+        .map_err(|err| BackendError::Io(format!("invalid PTY path: {err}")))
+}
+
+fn close_fd(fd: RawFd) {
+    unsafe {
+        libc::close(fd);
+    }
 }
 
 fn lldb_quote(input: &str) -> String {

@@ -18,6 +18,7 @@ pub enum BottomTab {
     Breakpoints,
     Trace,
     Analysis,
+    Terminal,
     Output,
 }
 
@@ -112,6 +113,8 @@ pub enum UiEvent {
     ClearTrace,
     SetBottomTab(BottomTab),
     JumpToCurrentInstruction,
+    SubmitTerminalInput(String),
+    ClearTerminal,
     ShowAbout,
     Quit,
 }
@@ -137,6 +140,9 @@ pub struct UiModel {
     pub memory_base_input: String,
     pub memory_bytes: Vec<u8>,
     pub analysis_lines: Vec<String>,
+    pub terminal_output: String,
+    pub terminal_input: String,
+    pub terminal_connected: bool,
     pub output_lines: Vec<String>,
     pub bottom_tab: BottomTab,
 }
@@ -163,6 +169,9 @@ impl Default for UiModel {
             memory_base_input: "0x1000".to_string(),
             memory_bytes: Vec::new(),
             analysis_lines: Vec::new(),
+            terminal_output: String::new(),
+            terminal_input: String::new(),
+            terminal_connected: false,
             output_lines: Vec::new(),
             bottom_tab: BottomTab::Trace,
         }
@@ -244,6 +253,10 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
                 }
                 if ui.button("Clear Output").clicked() {
                     events.push(UiEvent::ClearOutput);
+                    ui.close_menu();
+                }
+                if ui.button("Clear Terminal").clicked() {
+                    events.push(UiEvent::ClearTerminal);
                     ui.close_menu();
                 }
             });
@@ -331,6 +344,10 @@ fn top_bar(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEvent>) 
                 }
                 if ui.button("Output Tab").clicked() {
                     events.push(UiEvent::SetBottomTab(BottomTab::Output));
+                    ui.close_menu();
+                }
+                if ui.button("Terminal Tab").clicked() {
+                    events.push(UiEvent::SetBottomTab(BottomTab::Terminal));
                     ui.close_menu();
                 }
                 if ui.button("Analysis Tab").clicked() {
@@ -751,6 +768,7 @@ fn bottom_panel(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEve
                 tab_button(ui, model, BottomTab::Breakpoints, "Breakpoints");
                 tab_button(ui, model, BottomTab::Trace, "Trace");
                 tab_button(ui, model, BottomTab::Analysis, "Analysis");
+                tab_button(ui, model, BottomTab::Terminal, "Terminal");
                 tab_button(ui, model, BottomTab::Output, "Output");
             });
             ui.separator();
@@ -761,6 +779,7 @@ fn bottom_panel(ctx: &egui::Context, model: &mut UiModel, events: &mut Vec<UiEve
                 BottomTab::Breakpoints => render_breakpoints(ui, model, events),
                 BottomTab::Trace => render_trace(ui, model),
                 BottomTab::Analysis => render_analysis(ui, model),
+                BottomTab::Terminal => render_terminal(ui, model, events),
                 BottomTab::Output => render_output(ui, model),
             }
         });
@@ -984,6 +1003,51 @@ fn render_output(ui: &mut egui::Ui, model: &UiModel) {
                 ui.label(RichText::new(line).monospace().color(Color32::LIGHT_GRAY));
             }
         });
+}
+
+fn render_terminal(ui: &mut egui::Ui, model: &mut UiModel, events: &mut Vec<UiEvent>) {
+    ui.horizontal(|ui| {
+        let status = if model.terminal_connected {
+            "Connected to target stdin/stdout"
+        } else {
+            "No live target terminal attached"
+        };
+        ui.label(status);
+        if ui.button("Clear").clicked() {
+            events.push(UiEvent::ClearTerminal);
+        }
+    });
+    ui.separator();
+    ScrollArea::vertical()
+        .id_salt("terminal_scroll")
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            if model.terminal_output.is_empty() {
+                ui.label("Target output will appear here after launch.");
+            } else {
+                ui.label(RichText::new(&model.terminal_output).monospace());
+            }
+        });
+    ui.separator();
+    ui.horizontal(|ui| {
+        let response = ui.add_enabled(
+            model.terminal_connected,
+            TextEdit::singleline(&mut model.terminal_input)
+                .desired_width(f32::INFINITY)
+                .hint_text("Type input for the running target and press Enter"),
+        );
+        let submit = response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+        if submit || ui
+            .add_enabled(model.terminal_connected, egui::Button::new("Send"))
+            .clicked()
+        {
+            if !model.terminal_input.is_empty() {
+                let mut input = std::mem::take(&mut model.terminal_input);
+                input.push('\n');
+                events.push(UiEvent::SubmitTerminalInput(input));
+            }
+        }
+    });
 }
 
 fn can_launch(model: &UiModel) -> bool {

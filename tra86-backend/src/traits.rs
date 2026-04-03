@@ -6,7 +6,7 @@ use tra86_core::{
     ThreadState,
 };
 
-use crate::BackendError;
+use crate::{BackendError, SharedTerminal};
 
 #[derive(Debug, Clone)]
 pub struct LaunchRequest {
@@ -61,6 +61,10 @@ pub trait DebugBackend: Send {
     fn source_location(&mut self, address: Address)
         -> Result<Option<SourceLocation>, BackendError>;
     fn symbolicate(&mut self, address: Address) -> Result<Option<SymbolInfo>, BackendError>;
+
+    fn terminal_io(&self) -> Option<SharedTerminal> {
+        None
+    }
 
     fn capabilities(&self) -> BTreeMap<String, bool> {
         BTreeMap::new()

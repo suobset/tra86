@@ -64,6 +64,17 @@ cargo test
 cargo run -p tra86-app
 ```
 
+Interactive debugger CLI:
+
+```bash
+cargo run -p tra86-app --bin tra86_cli
+cargo run -p tra86-app --bin tra86_cli -- launch /path/to/program -- arg1 arg2
+cargo run -p tra86-app --bin tra86_cli -- attach 12345
+```
+
+Once the CLI starts, use `help` to list commands for launch, attach, stepping, register reads,
+memory reads, breakpoints, and disassembly.
+
 Useful smoke check:
 
 ```bash
