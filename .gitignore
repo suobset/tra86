@@ -14,3 +14,6 @@ fixtures/native/build/
 .idea/
 *.swp
 *.swo
+
+# macOS packaging output
+/dist/

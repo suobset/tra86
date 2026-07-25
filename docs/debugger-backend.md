@@ -52,22 +52,37 @@ Ops: `open_target`, `launch`, `attach`, `resume`, `step`, `add_breakpoint`,
   a timeout (`DEFAULT_TIMEOUT = 20s`, tunable). A blocked op returns a typed
   `BindError::Backend` instead of freezing the worker.
 
-### Known platform limitation: live process control
+### Live process control and OS authorization
 
-On current macOS, launching/attaching under LLDB requires developer-tools
-authorization. In a headless/CI context this **blocks**, so:
+The full live path — launch → breakpoint → registers → backtrace → step — is
+implemented and validated. Its availability depends on OS debugging
+authorization:
 
 - **Static** operations (open target, resolve symbols, resolve breakpoints,
-  disassemble) work fully and are covered by a real, non-skipped integration
-  test (`tests/lldb_integration.rs`).
-- **Live** operations are attempted with a short timeout and, if they do not
-  complete, the test **skips with a clear message** rather than hanging or
+  disassemble) never require authorization and are covered by a non-skipped
+  integration test (`tests/lldb_integration.rs`).
+- **Live** operations require authorization. Where it is granted, the
+  integration test asserts the whole flow (`live_debug_full_flow_when_authorized`);
+  where it is not, the test **skips with a clear message** rather than hanging or
   silently passing.
 
-To use live debugging locally, ensure debugging is authorized (e.g.
-`DevToolsSecurity -enable`, or run in a context where the OS grants the
-`com.apple.security.get-task-allow` / debugging entitlement). On Linux with a
-full LLDB install, live control works without this dance.
+**macOS.** Live control requires developer-tools authorization
+(`sudo DevToolsSecurity -enable`, once, as admin). Without it, the first attach
+blocks on a `taskgated` prompt; Bind's request times out into a typed error
+instead of freezing. The privileged work is done by Apple's already-entitled
+`debugserver`; for a *distributed* (notarized) Bind see
+[`packaging-macos.md`](packaging-macos.md).
+
+**Linux.** No authorization dance — just the `SYS_PTRACE` capability. The
+reproducible way to run the live path is the Docker harness:
+
+```bash
+scripts/test-linux.sh          # -> "LIVE OK: launched, hit breakpoint, ..."
+```
+
+See [`docker.md`](docker.md) for what the image sets up (notably two Debian
+LLDB-packaging repairs: a dangling `_lldb` binding symlink and `lldb-server`
+discovery).
 
 ## Adding another backend
 

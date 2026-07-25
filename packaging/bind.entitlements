@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hardened-Runtime entitlements for a notarized Bind.
+
+  Bind is a debugger, so under the Hardened Runtime it requests the debugging
+  entitlement. The privileged process control on macOS is ultimately performed
+  by Apple's `debugserver` (which ships already entitled), and the machine must
+  additionally have developer-tools debugging authorized (`DevToolsSecurity
+  -enable`, once, as admin). See docs/packaging-macos.md.
+
+  Do NOT ship `com.apple.security.get-task-allow` (that is a development-only
+  entitlement and will fail notarization).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Allow Bind to act as a debugger (attach to / control other processes). -->
+  <key>com.apple.security.cs.debugger</key>
+  <true/>
+
+  <!-- Bind launches the LLDB Python driver, which dlopens the LLDB framework
+       from a path resolved at runtime; permit loading those libraries. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- Bind passes PYTHONPATH to the child interpreter so it can import the
+       LLDB SB-API module; permit environment-variable configuration. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+</dict>
+</plist>

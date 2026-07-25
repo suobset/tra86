@@ -33,9 +33,10 @@ coherent, fully-tested core — not yet a finished product.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for a per-feature status table. The
 core (model, backend trait, mock, worker, TUI, trace, analysis, symbols) is
-implemented and tested; the LLDB backend's **static** operations are covered by
-a real integration test, while **live** control is implemented but
-environment-gated.
+implemented and tested. The LLDB backend's **static** operations are covered by
+a real integration test, and the **full live flow** (launch → breakpoint →
+registers → backtrace → step) is asserted end to end via the Docker harness
+([`docs/docker.md`](docs/docker.md)) and on authorized macOS.
 
 ## Supported hosts & targets
 
@@ -59,6 +60,19 @@ cargo build --release
 cargo test --workspace
 ```
 
+**Live debugging authorization.** Static inspection needs nothing special. Live
+launch/attach requires OS debugging authorization:
+
+- **macOS:** `sudo DevToolsSecurity -enable` (once). Without it the first attach
+  blocks on a system prompt; Bind times out into a clear error rather than
+  hanging.
+- **Linux:** just the `SYS_PTRACE` capability. Run the reproducible live-path
+  harness with `scripts/test-linux.sh` (see [`docs/docker.md`](docs/docker.md)).
+
+**Distributable macOS build.** `scripts/package-macos.sh` produces a universal,
+Developer ID-signed, notarized, stapled `.pkg` — see
+[`docs/packaging-macos.md`](docs/packaging-macos.md).
+
 ## Usage
 
 ```bash
@@ -80,20 +94,25 @@ Full command grammar in [`docs/tui.md`](docs/tui.md).
 
 ## Known limitations
 
-- **macOS live debugging** requires developer-tools authorization; headless
-  launch can block. Bind times out gracefully and the LLDB integration test
-  skips the live portion with a clear message. See
-  [`docs/debugger-backend.md`](docs/debugger-backend.md).
-- Trace persistence and analyses exist and are tested but are only lightly wired
-  into the interactive loop so far (see the roadmap).
+- **macOS live debugging** requires developer-tools authorization
+  (`sudo DevToolsSecurity -enable`); without it the first attach blocks and Bind
+  times out gracefully. See [`docs/debugger-backend.md`](docs/debugger-backend.md).
+- No variable/locals evaluation view, watchpoints, or core-file open yet
+  (roadmapped).
+- The analysis and trace layers are wired into the TUI but still shallow
+  compared to the eventual goal (see the roadmap).
 
 ## Documentation
+
+Full index: [`docs/README.md`](docs/README.md).
 
 - [Architecture](docs/architecture.md)
 - [Debugger backend](docs/debugger-backend.md)
 - [Trace format](docs/trace-format.md)
 - [TUI](docs/tui.md)
 - [Testing](docs/testing.md)
+- [Live LLDB via Docker](docs/docker.md)
+- [macOS packaging & notarization](docs/packaging-macos.md)
 - [Roadmap](docs/roadmap.md)
 - [tra86 → Bind migration](docs/tra86-migration.md)
 - [Contributing](CONTRIBUTING.md)

@@ -44,12 +44,21 @@ help overlay, error surfacing, timeline population, plus `UiState` transitions
 - **Static ops asserted directly** against a compiled `fixtures/native/loop.c`:
   target load, symbol resolution, breakpoint resolution with source lines, and
   real instruction disassembly with bytes.
-- **Live launch** is attempted with a short timeout; if OS developer-tools
-  authorization is unavailable it **skips with a clear message** (never silently
-  passes, never hangs). See `docs/debugger-backend.md`.
+- **Full live flow** (`live_debug_full_flow_when_authorized`): launch stopped at
+  entry → breakpoint on `helper` hit → non-empty live register set with a pc →
+  backtrace containing `helper` called from `main` → instruction step. Asserted
+  where OS debugging is authorized; **skipped with a clear message** otherwise
+  (never silently passes, never hangs).
 
-Environment-dependent tests print `SKIP: …` to stderr and return, rather than
-passing silently, when LLDB or a compiler is absent.
+Run the live path reproducibly on Linux via the Docker harness (no macOS
+authorization gate):
+
+```bash
+scripts/test-linux.sh    # cargo test -p bind-lldb with SYS_PTRACE
+```
+
+See `docs/docker.md`. Environment-dependent tests print `SKIP: …` to stderr and
+return, rather than passing silently, when LLDB or a compiler is absent.
 
 ### End-to-end smoke
 `bind diag [--mock]` runs a scripted launch→breakpoint→continue→step flow and

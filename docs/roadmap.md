@@ -16,7 +16,9 @@ breadth. Status legend: ✅ done & tested · 🟡 implemented, not integration-t
 | Symbols (index + demangling + cache) | ✅ |
 | Config/keybindings/annotations | ✅ |
 | LLDB backend — static ops (target/symbols/disasm/breakpoints) | ✅ |
-| LLDB backend — live control (launch/step/registers/frames) | 🟡 (blocked by macOS authorization here; works where debugging is authorized) |
+| LLDB backend — live control (launch/breakpoint/registers/backtrace/step) | ✅ (asserted in the Docker harness and on authorized macOS) |
+| Docker harness for live LLDB (`scripts/test-linux.sh`) | ✅ |
+| macOS packaging: sign + notarize (`scripts/package-macos.sh`) | ✅ scripted; needs your Developer ID to run |
 | `diag` noninteractive smoke | ✅ |
 | Watchpoints | 🟦 (modeled, not wired) |
 | Core-file open | 🟦 (CLI + spec present, driver op deferred) |
@@ -25,19 +27,18 @@ breadth. Status legend: ✅ done & tested · 🟡 implemented, not integration-t
 
 ## Next five highest-value steps
 
-1. **Wire the trace recorder into the app loop.** The worker already emits the
-   sequenced stream; connect `TraceRecorder` in `bind-cli::run_tui` so
-   `trace start/stop` persists and the timeline shows real drop counts.
-2. **Live LLDB on Linux CI.** Add a Linux CI job where LLDB process control is
-   unauthenticated, and promote the live integration test from skip to asserted
-   there (launch → breakpoint → step → registers).
-3. **Frame/variable evaluation.** Add driver ops for locals/arguments with
+1. **CI wiring.** Turn `scripts/test-linux.sh` (live LLDB) and the host
+   `cargo test`/`clippy`/`fmt` into a GitHub Actions workflow so the live path
+   runs on every push.
+2. **Frame/variable evaluation.** Add driver ops for locals/arguments with
    per-variable error isolation, and a variables view.
-4. **Watchpoints end to end.** Driver op + backend method + UI, with honest
+3. **Watchpoints end to end.** Driver op + backend method + UI, with honest
    capability reporting per target.
-5. **Register groups & wide registers.** Surface vector/flag groups and
+4. **Register groups & wide registers.** Surface vector/flag groups and
    `>64-bit` registers (the `Register::wide` field exists) with x86-64 coverage
    alongside aarch64.
+5. **Homebrew tap / release automation.** Wrap the notarized `.pkg` from
+   `scripts/package-macos.sh` in a tap and cut tagged releases.
 
 ## Deliberately out of scope (for now)
 
