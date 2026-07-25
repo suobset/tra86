@@ -1,0 +1,52 @@
+# Reproducible Linux environment for exercising Bind's *live* LLDB backend.
+#
+# On Linux there is no macOS developer-tools authorization gate, so the full
+# live path (launch -> breakpoint -> registers -> backtrace -> step) runs
+# unattended. This image bakes two Debian LLDB-packaging repairs so the SB-API
+# Python bindings import and lldb-server is discoverable; the repo is mounted at
+# run time (see scripts/test-linux.sh).
+#
+# Build: docker build -f docker/Dockerfile.linux-test -t bind-linux-test .
+# Run:   docker run --rm --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+#            -v "$PWD":/src:ro -v bind-cargo:/usr/local/cargo/registry \
+#            bind-linux-test
+FROM rust:1-slim-trixie
+
+# LLDB, its Python bindings, a C compiler for fixtures, and `cc`.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        lldb python3 python3-lldb gcc ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf "$(command -v gcc)" /usr/local/bin/cc
+
+# Repair 1: Debian ships a dangling `_lldb` extension symlink in the path that
+# `lldb -P` reports, so `import lldb` fails. Point it at the real bindings.
+RUN set -eux; \
+    SITE="$(lldb -P)"; export PYTHONPATH="$SITE"; \
+    if ! python3 -c 'import lldb' 2>/dev/null; then \
+        REAL="$(find /usr/lib -path '*dist-packages/lldb/_lldb.so' | head -1)"; \
+        BROKEN="$(find "$SITE/lldb" -maxdepth 1 -name '_lldb*.so' | head -1)"; \
+        [ -n "$REAL" ] && [ -n "$BROKEN" ] && ln -sf "$REAL" "$BROKEN"; \
+    fi; \
+    python3 -c 'import lldb; print("lldb", lldb.SBDebugger.GetVersionString().splitlines()[0])'
+
+# Repair 2: when LLDB is embedded via the Python module it looks for
+# lldb-server next to liblldb and in the install bindir under the exact
+# versioned name (e.g. lldb-server-19.1.7); Debian installs it elsewhere.
+RUN set -eux; \
+    LIBDIR="$(dirname "$(find /usr/lib -name 'liblldb-*.so.*' | head -1)")"; \
+    SERVER="$(find /usr/lib/llvm-* -name lldb-server -type f | head -1)"; \
+    FULL="$(lldb --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"; \
+    MAJOR="$(printf '%s' "$FULL" | cut -d. -f1)"; \
+    for d in "$LIBDIR" /usr/bin; do \
+        for n in lldb-server "lldb-server-$MAJOR" "lldb-server-$FULL"; do \
+            ln -sf "$SERVER" "$d/$n"; \
+        done; \
+    done
+
+WORKDIR /src
+# Keep build artifacts out of the read-only mounted source tree.
+ENV CARGO_TARGET_DIR=/tmp/bind-target
+# Only bind-lldb is needed to exercise the live backend, and it does not pull in
+# the TUI stack, keeping the build light.
+CMD ["cargo", "test", "-p", "bind-lldb", "--", "--nocapture"]

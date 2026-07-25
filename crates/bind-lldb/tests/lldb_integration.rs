@@ -1,19 +1,19 @@
 //! Integration tests against a *real* LLDB via the SB-API driver.
 //!
 //! Static target operations (open target, resolve symbols, resolve
-//! breakpoints, disassemble) do not require OS developer-tools authorization
-//! and are asserted directly. Live process control (launch/step/registers)
-//! requires authorization that is unavailable in headless/CI environments on
-//! current macOS, so that portion is attempted with a short timeout and
-//! *skipped with a clear message* rather than silently passing or hanging (see
-//! docs/debugger-backend.md).
+//! breakpoints, disassemble) never require OS authorization and are asserted
+//! directly. Live process control (launch → breakpoint → registers → backtrace
+//! → step) requires developer-tools authorization; where that is granted (an
+//! authorized macOS, or the Linux Docker harness in `scripts/test-linux.sh`)
+//! the full flow is asserted, and where it is not the test *skips with a clear
+//! message* rather than hanging or silently passing. See
+//! docs/debugger-backend.md.
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use bind_core::AttachSpec;
-use bind_core::TargetSpec;
+use bind_core::{AttachSpec, BreakpointLocation, StepKind, TargetSpec};
 use bind_debugger::DebugBackend;
 use bind_lldb::LldbBackend;
 use serde_json::json;
@@ -131,30 +131,99 @@ fn static_symbol_and_disassembly_against_real_lldb() {
 }
 
 #[test]
-fn live_launch_is_attempted_and_handled_honestly() {
+fn live_debug_full_flow_when_authorized() {
     let Some((mut backend, bin)) = guard() else {
         return;
     };
-    // Use a short timeout so a launch that blocks on authorization fails fast.
-    backend.client_mut().set_timeout(Duration::from_secs(3));
+    // Generous per-request timeout: launch under lldb-server can take a couple
+    // seconds. On unauthorized macOS the launch request will time out and the
+    // test skips; on Linux (e.g. the Docker harness) it completes and the full
+    // flow below is asserted.
+    backend.client_mut().set_timeout(Duration::from_secs(15));
 
-    let spec = AttachSpec::Launch(TargetSpec::program(bin.to_string_lossy().to_string()));
+    // Stop at entry so we have a stable point to install a breakpoint before
+    // the target runs.
+    let spec = AttachSpec::Launch(TargetSpec {
+        program: bin.to_string_lossy().to_string(),
+        args: vec![],
+        cwd: None,
+        env: vec![],
+        stop_at_entry: true,
+    });
+
     match backend.attach(&spec) {
         Ok(()) => {
-            // Live debugging is authorized here: assert we actually stopped.
             let info = backend.process_info().expect("process_info after launch");
             assert!(
-                info.lifecycle.is_alive() || info.lifecycle == bind_core::ProcessLifecycle::Exited,
-                "unexpected lifecycle after launch: {:?}",
+                info.lifecycle.is_stopped(),
+                "expected to be stopped at entry, got {:?}",
                 info.lifecycle
+            );
+
+            // Breakpoint on `helper`, then continue to hit it.
+            let bp = backend
+                .add_breakpoint(&BreakpointLocation::Symbol("helper".into()), None)
+                .expect("add breakpoint on helper");
+            assert!(bp.is_resolved(), "helper breakpoint should resolve");
+            backend.resume().expect("resume to breakpoint");
+
+            let stopped = backend.process_info().expect("process_info after resume");
+            assert!(
+                stopped.lifecycle.is_stopped(),
+                "should have stopped at the helper breakpoint, got {:?}",
+                stopped.lifecycle
+            );
+
+            let threads = backend.threads().expect("threads");
+            assert!(!threads.is_empty(), "expected at least one thread");
+            let tid = threads[0].id;
+
+            // Live registers: a real, non-empty set including the pc.
+            let regs = backend.registers(tid).expect("read live registers");
+            assert!(!regs.registers.is_empty(), "no registers read");
+            assert!(
+                regs.registers
+                    .iter()
+                    .any(|r| r.name == "pc" || r.name == "rip"),
+                "register set has no program counter"
+            );
+
+            // Live backtrace: `helper` must appear, called from `main`.
+            let frames = backend.frames(tid).expect("read frames");
+            assert!(
+                frames
+                    .iter()
+                    .any(|f| f.function.as_deref() == Some("helper")),
+                "backtrace missing helper: {:?}",
+                frames
+                    .iter()
+                    .map(|f| f.function.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                frames.iter().any(|f| f.function.as_deref() == Some("main")),
+                "backtrace missing main"
+            );
+
+            // Single instruction step must succeed.
+            backend
+                .step(StepKind::Instruction)
+                .expect("instruction step");
+
+            eprintln!(
+                "LIVE OK: launched, hit breakpoint, read {} registers, {} frames",
+                regs.registers.len(),
+                frames.len()
             );
             let _ = backend.terminate();
         }
         Err(e) => {
-            // Expected in headless/unauthorized environments. Not a failure.
+            // Expected on macOS without developer-tools authorization. Not a
+            // failure — the static SB-API test still asserts real LLDB works.
             eprintln!(
                 "SKIP live-debugging assertions: launch did not complete ({e}). \
-                 Static SB-API integration is covered by the other test."
+                 Run the Docker harness (scripts/test-linux.sh) to exercise the \
+                 live path on Linux."
             );
         }
     }
