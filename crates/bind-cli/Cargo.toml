@@ -1,0 +1,22 @@
+[package]
+name = "bind-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bind"
+path = "src/main.rs"
+
+[dependencies]
+bind-core = { workspace = true }
+bind-debugger = { workspace = true }
+bind-lldb = { workspace = true }
+bind-trace = { workspace = true }
+bind-tui = { workspace = true }
+bind-storage = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

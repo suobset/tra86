@@ -1,0 +1,11 @@
+[package]
+name = "bind-symbols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bind-core = { workspace = true }
+rustc-demangle = { workspace = true }
+cpp_demangle = { workspace = true }

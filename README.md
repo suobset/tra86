@@ -1,95 +1,103 @@
-# tra86
+# Bind
 
-`tra86` is a Rust desktop assembly tracer/debugger experiment. It is still currently under development. More coming soon.
+**Bind** is a terminal-native debugger, execution tracer, and runtime-analysis
+environment built on LLDB. It sits between a raw debugger and a program-analysis
+tool: more structured than driving `lldb` by hand, more interactive than an
+offline trace dump, and language- and architecture-independent by design.
 
-<img width="1894" height="1348" alt="image" src="https://github.com/user-attachments/assets/c3c13a46-be9f-4523-9ee7-474999857156" />
+Bind is the architectural successor to **tra86** (see
+[`docs/tra86-migration.md`](docs/tra86-migration.md)). It is an early but
+coherent, fully-tested core — not yet a finished product.
 
-## Current Status
+## What Bind is
 
-What is verified right now:
+- A **TUI-first** debugger (Ratatui): source/disassembly, registers with change
+  highlighting, stack/frames, memory, a typed event **timeline**, and live
+  **analysis** findings.
+- Built on a **typed event model** — every backend notification becomes a
+  normalized `DebugEvent`; the UI, trace, and analyses all consume the same
+  stream.
+- **Backend-independent**: LLDB is one implementation behind a trait; a
+  deterministic mock backend runs the entire app with no debugger.
+- **Architecture- and language-independent** in the model: aarch64 and x86-64
+  register handling is isolated; source language is optional metadata.
 
-- `cargo check` passes
-- `cargo test` passes with analysis tests, LLDB parser tests, and real LLDB integration tests against compiled C and C++ fixtures
-- `cargo run -p tra86-app` launches the desktop app
-- the LLDB path can launch, attach, inspect memory/registers/frames, resolve symbols/source, and step real native fixtures
+## What Bind is not (yet)
 
-What is not yet true:
+- Not a finished, production debugger.
+- Live LLDB process control is gated by OS authorization on macOS (see below);
+  static analysis of a target works regardless.
+- No variable evaluation view, watchpoints, or core-file open yet (roadmapped).
 
-- this is not a production-ready tracer/debugger
-- the backend is not yet robust across common failure cases
-- mid-run pause/stop is still not reliable enough on the current LLDB CLI transport, so the UI does not pretend that it is
-- the analysis layer is still thin
-- the architecture still contains a few abstractions that overpromise capability
+## Maturity
 
-## Workspace
+See [`docs/roadmap.md`](docs/roadmap.md) for a per-feature status table. The
+core (model, backend trait, mock, worker, TUI, trace, analysis, symbols) is
+implemented and tested; the LLDB backend's **static** operations are covered by
+a real integration test, while **live** control is implemented but
+environment-gated.
 
-- `tra86-core`: normalized execution/domain types
-- `tra86-backend`: backend trait, errors, mock backend, thin backend wrapper
-- `tra86-backend-lldb`: LLDB-specific adapter and parsers
-- `tra86-analysis`: register delta and instruction classification helpers
-- `tra86-ui`: egui rendering and UI event model
-- `tra86-app`: application wiring, worker thread, session persistence
+## Supported hosts & targets
 
-## What Already Exists
+- **Hosts:** macOS (arm64 validated) and Linux. LLDB must be installed.
+- **Targets:** any binary LLDB can inspect — C, C++, Rust, Swift, Objective-C,
+  Zig, other LLVM languages, mixed-language and stripped binaries (with reduced
+  capability). C and Rust/C++ are the primary validation targets.
 
-- egui desktop shell
-- backend worker thread to keep debugger work off the UI thread
-- disassembly, registers, frames, threads, breakpoints, memory, trace panes
-- LLDB adapter behind a Rust trait instead of embedding LLDB types in the UI
-- a mock backend that is useful for UI work but currently makes the product look farther along than it is
+## LLDB requirement
 
-<img width="1894" height="1348" alt="image" src="https://github.com/user-attachments/assets/02cc5944-9b20-4828-84e0-d10165dab086" />
+Bind drives the LLDB **Python SB API** out-of-process (it does not link
+liblldb). It needs `lldb` on `PATH` such that `lldb -P` prints the LLDB python
+path. On macOS this ships with Xcode / Command Line Tools; on Debian/Ubuntu
+`apt install lldb`, on Fedora `dnf install lldb python3-lldb`.
 
-## Biggest Current Problems
-
-- the LLDB adapter is text-protocol brittle
-- the session model is better than it was, but it is still not a full state machine with generation tracking
-- some backend failure paths are now surfaced in the UI, but lifecycle recovery is still incomplete
-- test coverage is now real but still thin compared to the size of the product goal
-- some abstractions are more decorative than proven
-
-## Build And Run
-
-Prerequisites:
-
-- Rust stable toolchain
-- LLDB installed and available on `PATH`
-- macOS or Linux desktop environment
-
-Commands:
+## Install & build
 
 ```bash
-cargo check
-cargo test
-cargo run -p tra86-app
+# Rust stable toolchain required (https://rustup.rs)
+cargo build --release
+cargo test --workspace
 ```
 
-Interactive debugger CLI:
+## Usage
 
 ```bash
-cargo run -p tra86-app --bin tra86_cli
-cargo run -p tra86-app --bin tra86_cli -- launch /path/to/program -- arg1 arg2
-cargo run -p tra86-app --bin tra86_cli -- attach 12345
+bind ./program                 # launch under the LLDB backend
+bind ./program -- arg1 arg2    # pass target arguments
+bind attach 12345              # attach to a pid
+bind open core.dump ./program  # open a core file (scaffolded)
+bind --mock                    # run the deterministic mock backend (no LLDB)
+bind diag --mock               # noninteractive smoke report
 ```
 
-Once the CLI starts, use `help` to list commands for launch, attach, stepping, register reads,
-memory reads, breakpoints, and disassembly.
+If LLDB isn't detected, Bind falls back to the mock backend with a warning.
 
-Useful smoke check:
+### Keys
 
-```bash
-cargo run -p tra86-app --bin lldb_smoke -- /path/to/debuggable/binary
-```
+`c` continue · `n` next · `s` step-in · `o` finish · `i` instruction ·
+`Tab` focus · `:` command palette · `/` search · `?` help · `q` / `Ctrl-C` quit.
+Full command grammar in [`docs/tui.md`](docs/tui.md).
 
-Performance notes and current hotspots live in [`PERF.md`](./PERF.md).
+## Known limitations
 
-## Direction
+- **macOS live debugging** requires developer-tools authorization; headless
+  launch can block. Bind times out gracefully and the LLDB integration test
+  skips the live portion with a clear message. See
+  [`docs/debugger-backend.md`](docs/debugger-backend.md).
+- Trace persistence and analyses exist and are tested but are only lightly wired
+  into the interactive loop so far (see the roadmap).
 
-The intended product is still the same:
+## Documentation
 
-- Rust-native desktop application
-- backend-agnostic normalized execution model
-- real tracing/debugging on native binaries
-- strong debugger fidelity before UI polish
+- [Architecture](docs/architecture.md)
+- [Debugger backend](docs/debugger-backend.md)
+- [Trace format](docs/trace-format.md)
+- [TUI](docs/tui.md)
+- [Testing](docs/testing.md)
+- [Roadmap](docs/roadmap.md)
+- [tra86 → Bind migration](docs/tra86-migration.md)
+- [Contributing](CONTRIBUTING.md)
 
-The next work should focus on backend reliability, a better transport for true async pause/resume behavior, typed failure handling, and a session model that does not drift out of sync when the target process does something inconvenient.
+## License
+
+MIT.

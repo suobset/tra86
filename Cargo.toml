@@ -1,11 +1,14 @@
 [workspace]
 members = [
-  "tra86-app",
-  "tra86-core",
-  "tra86-backend",
-  "tra86-backend-lldb",
-  "tra86-analysis",
-  "tra86-ui",
+  "crates/bind-core",
+  "crates/bind-debugger",
+  "crates/bind-trace",
+  "crates/bind-analysis",
+  "crates/bind-symbols",
+  "crates/bind-storage",
+  "crates/bind-tui",
+  "crates/bind-lldb",
+  "crates/bind-cli",
 ]
 resolver = "2"
 
@@ -13,16 +16,33 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 version = "0.1.0"
-authors = ["tra86 contributors"]
+authors = ["Bind contributors"]
+repository = "https://github.com/suobset/bind"
 
 [workspace.dependencies]
-thiserror = "1"
+# internal
+bind-core = { path = "crates/bind-core" }
+bind-debugger = { path = "crates/bind-debugger" }
+bind-lldb = { path = "crates/bind-lldb" }
+bind-trace = { path = "crates/bind-trace" }
+bind-analysis = { path = "crates/bind-analysis" }
+bind-symbols = { path = "crates/bind-symbols" }
+bind-storage = { path = "crates/bind-storage" }
+bind-tui = { path = "crates/bind-tui" }
+
+# external
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "1"
+anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-eframe = { version = "0.31", default-features = true }
-egui = "0.31"
-anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+rustc-demangle = "0.1"
+cpp_demangle = "0.4"
+
+[profile.release]
+debug = 1

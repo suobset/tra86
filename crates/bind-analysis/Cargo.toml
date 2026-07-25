@@ -1,0 +1,11 @@
+[package]
+name = "bind-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bind-core = { workspace = true }
+bind-symbols = { workspace = true }
+serde = { workspace = true }
