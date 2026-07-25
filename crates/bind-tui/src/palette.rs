@@ -16,7 +16,15 @@ pub enum UiAction {
     Layout(LayoutMode),
     FocusPanel(Panel),
     Search(String),
-    ShowMemory { addr: Address, len: usize },
+    ShowMemory {
+        addr: Address,
+        len: usize,
+    },
+    /// Begin recording the event stream (to a file when `path` is given).
+    TraceStart {
+        path: Option<String>,
+    },
+    TraceStop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,11 +196,13 @@ fn parse_break(rest: &[&str]) -> Result<Parsed, String> {
 }
 
 fn parse_trace(rest: &[&str]) -> Result<Parsed, String> {
+    // Trace capture lives in the TUI (it owns the event ring), so these are UI
+    // actions, not worker commands.
     match rest.first().copied() {
-        Some("start") => Ok(Parsed::Command(Command::TraceStart {
+        Some("start") => Ok(Parsed::Ui(UiAction::TraceStart {
             path: rest.get(1).map(|s| s.to_string()),
         })),
-        Some("stop") => Ok(Parsed::Command(Command::TraceStop)),
+        Some("stop") => Ok(Parsed::Ui(UiAction::TraceStop)),
         _ => Err("usage: trace start [path] | trace stop".into()),
     }
 }

@@ -321,9 +321,15 @@ fn render_timeline_row(
 
 fn render_timeline(frame: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
     let focused = state.focus == Panel::Timeline;
-    let dropped = state.snapshot.events_dropped;
+    let dropped = state.trace_dropped();
+    let total = state.trace_total();
+    let rec = if state.trace_persisting() {
+        " ●REC"
+    } else {
+        ""
+    };
     let title = format!(
-        "Timeline  ({} shown{})",
+        "Timeline  ({} shown, {total} total{}{rec})",
         state.timeline.len(),
         if dropped > 0 {
             format!(", {dropped} dropped")

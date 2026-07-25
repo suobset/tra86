@@ -43,6 +43,12 @@ impl TraceRecorder {
         self.filter = filter;
     }
 
+    /// Mutable access to the session metadata (e.g. to fill in arch/executable
+    /// once the target has loaded).
+    pub fn metadata_mut(&mut self) -> &mut TraceMetadata {
+        &mut self.metadata
+    }
+
     /// Begins persisting to `path`. Existing recent events are seeded into the
     /// record so a mid-session start still captures buffered history.
     pub fn start_persisting(&mut self, path: impl Into<PathBuf>) {

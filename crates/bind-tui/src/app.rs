@@ -9,10 +9,11 @@
 use std::collections::VecDeque;
 
 use bind_analysis::{default_analyzers, AnalysisContext, AnalyzerSet, Finding};
-use bind_core::{Address, Command, SequencedEvent, SessionSnapshot, StepKind};
+use bind_core::{Address, BreakpointLocation, Command, SequencedEvent, SessionSnapshot, StepKind};
 use bind_debugger::WorkerUpdate;
 use bind_storage::Preferences;
 use bind_symbols::SymbolIndex;
+use bind_trace::{TraceMetadata, TraceRecorder};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::palette::{self, LayoutMode, Panel, Parsed, UiAction};
@@ -54,12 +55,19 @@ pub struct UiState {
     // Analysis plumbing (kept private to the state).
     symbols: SymbolIndex,
     analyzers: AnalyzerSet,
+    /// Bounded trace recorder: retains recent events and, when persisting,
+    /// accumulates the full record for `trace start/stop`.
+    recorder: TraceRecorder,
     /// A memory read the UI has requested and is waiting on.
     pending_memory: Option<(Address, usize)>,
 }
 
 impl UiState {
     pub fn new(snapshot: SessionSnapshot, prefs: Preferences) -> Self {
+        let recorder = TraceRecorder::new(
+            TraceMetadata::new(snapshot.process.arch),
+            prefs.ring_capacity,
+        );
         Self {
             snapshot,
             timeline: VecDeque::with_capacity(TIMELINE_CAP.min(256)),
@@ -77,7 +85,41 @@ impl UiState {
             should_quit: false,
             symbols: SymbolIndex::new(),
             analyzers: default_analyzers(),
+            recorder,
             pending_memory: None,
+        }
+    }
+
+    /// Total events observed this session (retained + dropped).
+    pub fn trace_total(&self) -> u64 {
+        self.recorder.total()
+    }
+
+    /// Events not retained in the interactive ring (evicted or filtered out).
+    pub fn trace_dropped(&self) -> u64 {
+        self.recorder.dropped()
+    }
+
+    /// Whether a trace is currently being written to disk.
+    pub fn trace_persisting(&self) -> bool {
+        self.recorder.is_persisting()
+    }
+
+    /// Begins recording a trace (to `path` when given). Used by `--trace` and
+    /// the `trace start` palette command.
+    pub fn start_trace(&mut self, path: Option<String>) {
+        self.recorder
+            .metadata_mut()
+            .executable
+            .clone_from(&self.snapshot.program);
+        match path {
+            Some(p) => {
+                self.recorder.start_persisting(p.clone());
+                self.status = format!("recording trace -> {p}");
+            }
+            None => {
+                self.status = "recording trace (in-memory ring)".into();
+            }
         }
     }
 
@@ -86,12 +128,21 @@ impl UiState {
         match update {
             WorkerUpdate::Snapshot(snap) => {
                 self.ingest_symbols(&snap);
+                // Fill in trace metadata once the target's architecture is known.
+                let meta = self.recorder.metadata_mut();
+                if meta.arch == bind_core::Architecture::Unknown {
+                    meta.arch = snap.process.arch;
+                }
+                if meta.executable.is_none() {
+                    meta.executable.clone_from(&snap.program);
+                }
                 self.snapshot = *snap;
             }
             WorkerUpdate::Event(ev) => {
                 let mut ctx = AnalysisContext::new(Some(&mut self.symbols));
                 self.analyzers.on_event(&ev, &mut ctx);
                 self.findings = self.analyzers.findings();
+                self.recorder.record(ev.clone());
                 self.push_timeline(ev);
             }
             WorkerUpdate::Memory { addr, bytes } => {
@@ -195,6 +246,7 @@ impl UiState {
             KeyCode::Char('o') => vec![Command::Step(StepKind::Out)],
             KeyCode::Char('i') => vec![Command::Step(StepKind::Instruction)],
             KeyCode::Char('p') => vec![Command::Pause],
+            KeyCode::Char('b') => self.toggle_breakpoint_at_current(),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_selection(-1);
                 vec![]
@@ -283,6 +335,49 @@ impl UiState {
                 self.status = format!("reading {len} bytes at {addr}");
                 vec![Command::ReadMemory { addr, len }]
             }
+            UiAction::TraceStart { path } => {
+                self.start_trace(path);
+                vec![]
+            }
+            UiAction::TraceStop => {
+                match self.recorder.stop_persisting() {
+                    Ok(Some(p)) => self.status = format!("trace saved: {}", p.display()),
+                    Ok(None) => self.status = "trace stopped (was not persisting)".into(),
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+                vec![]
+            }
+        }
+    }
+
+    /// Toggles a breakpoint at the current instruction (or the selected frame's
+    /// pc): removes an existing one there, otherwise adds one by address.
+    fn toggle_breakpoint_at_current(&mut self) -> Vec<Command> {
+        let pc = self
+            .snapshot
+            .disassembly
+            .iter()
+            .find(|i| i.is_current)
+            .map(|i| i.address)
+            .or_else(|| self.snapshot.selected_frame().map(|f| f.pc));
+        let Some(pc) = pc else {
+            self.error = Some("no current instruction to toggle a breakpoint on".into());
+            return vec![];
+        };
+        if let Some(bp) = self
+            .snapshot
+            .breakpoints
+            .iter()
+            .find(|b| b.resolved.iter().any(|r| r.address == pc))
+        {
+            self.status = format!("removing breakpoint #{} at {pc}", bp.id);
+            vec![Command::RemoveBreakpoint(bp.id)]
+        } else {
+            self.status = format!("breakpoint at {pc}");
+            vec![Command::AddBreakpoint {
+                location: BreakpointLocation::Address(pc),
+                condition: None,
+            }]
         }
     }
 

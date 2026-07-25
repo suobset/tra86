@@ -156,12 +156,8 @@ fn run_tui(
         worker.send(Command::Attach(spec)).ok();
     }
     if let Some(path) = &cli.trace {
-        state.status = format!("trace -> {path}");
-        worker
-            .send(Command::TraceStart {
-                path: Some(path.clone()),
-            })
-            .ok();
+        // Trace capture is owned by the TUI (it holds the event ring).
+        state.start_trace(Some(path.clone()));
     }
 
     // The terminal guard restores on any exit path, including panic.
