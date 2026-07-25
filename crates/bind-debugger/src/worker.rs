@@ -108,6 +108,9 @@ struct Worker {
     start: Instant,
     prev_registers: Option<RegisterSet>,
     selected_thread: Option<ThreadId>,
+    /// The program under debug, remembered from the attach request so every
+    /// snapshot can carry it (backends don't expose it through the trait).
+    program: Option<String>,
 }
 
 impl Worker {
@@ -120,6 +123,7 @@ impl Worker {
             start: Instant::now(),
             prev_registers: None,
             selected_thread: None,
+            program: None,
         }
     }
 
@@ -147,7 +151,14 @@ impl Worker {
         let result: Result<bool, BindError> = (|| {
             match command {
                 Command::Shutdown => return Ok(true),
-                Command::Attach(spec) => self.backend.attach(&spec)?,
+                Command::Attach(spec) => {
+                    self.program = match &spec {
+                        bind_core::AttachSpec::Launch(t) => Some(t.program.clone()),
+                        bind_core::AttachSpec::CoreFile { program, .. } => Some(program.clone()),
+                        bind_core::AttachSpec::Pid(pid) => Some(format!("pid {pid}")),
+                    };
+                    self.backend.attach(&spec)?
+                }
                 Command::Continue => self.backend.resume()?,
                 Command::Pause => self.backend.pause()?,
                 Command::Step(kind) => self.backend.step(kind)?,
@@ -246,6 +257,7 @@ impl Worker {
         let caps = self.backend.capabilities();
         let name = self.backend.name().to_string();
         let mut snap = SessionSnapshot::empty(self.id, name, caps);
+        snap.program.clone_from(&self.program);
 
         let process = self.backend.process_info()?;
         let stopped = process.lifecycle.is_stopped();

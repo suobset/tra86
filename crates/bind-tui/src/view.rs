@@ -359,7 +359,9 @@ fn render_timeline(frame: &mut Frame, area: Rect, state: &UiState, theme: &Theme
             let line = Line::from(vec![
                 Span::styled(format!("{marker} "), theme.dim()),
                 Span::styled(format!("{:>5} ", ev.seq.raw()), theme.dim()),
-                Span::styled(format!("{:<18}", ev.event.kind()), Style::default()),
+                // Widest kind label is "instruction-stepped" (19); pad to 20 so
+                // the detail column never collides with it.
+                Span::styled(format!("{:<20}", ev.event.kind()), Style::default()),
                 Span::styled(detail, theme.dim()),
             ]);
             let style = if selected {
